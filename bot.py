@@ -26,7 +26,7 @@ def send_welcome(message):
 def handle_ai_message(message):
     bot.send_chat_action(message.chat.id, 'typing')
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={GEMINI_API_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{
