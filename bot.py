@@ -26,7 +26,10 @@ def send_welcome(message):
 def handle_ai_message(message):
     bot.send_chat_action(message.chat.id, 'typing')
     try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + str(GEMINI_API_KEY)
+        host = "https://generativelanguage.googleapis.com"
+        path = "/v1beta/models/gemini-1.5-flash:generateContent"
+        url = f"{host}{path}?key={GEMINI_API_KEY}"
+        
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{
@@ -38,8 +41,8 @@ def handle_ai_message(message):
         result = response.json()
         
         if 'error' in result:
-            error_message = result['error'].get('message', 'Неизвестная ошибка API')
-            bot.reply_to(message, f"⚠️ Ошибка Google API: {error_message}")
+            err_msg = result['error'].get('message', 'Ошибка API')
+            bot.reply_to(message, f"⚠️ Ошибка Google API: {err_msg}")
             return
             
         ai_reply = result['candidates'][0]['content']['parts'][0]['text']
@@ -54,4 +57,3 @@ if __name__ == '__main__':
     
     print("Бот запущен и ждет сообщения...")
     bot.infinity_polling()
-
