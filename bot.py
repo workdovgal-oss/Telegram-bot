@@ -15,7 +15,6 @@ def home():
     return "Бот работает!"
 
 def run_flask():
-    # Render выделяет порт автоматически через переменную окружения PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -41,12 +40,12 @@ def handle_ai_message(message):
         ai_reply = result['candidates'][0]['content']['parts'][0]['text']
         bot.reply_to(message, ai_reply)
         
-        except Exception as e:
-        print(f"Ошибка: {e}")
-        bot.reply_to(message, f"⚠️ Ошибка отладки: {str(e)}")
+    except Exception as e:
+        error_text = str(e)
+        print(f"Ошибка: {error_text}")
+        bot.reply_to(message, f"⚠️ Ошибка: {error_text}")
 
 if __name__ == '__main__':
-    # Запускаем веб-сервер в отдельном потоке, чтобы он занимал порт для Render
     t = Thread(target=run_flask)
     t.start()
     
