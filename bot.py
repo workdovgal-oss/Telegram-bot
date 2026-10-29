@@ -41,9 +41,9 @@ def handle_ai_message(message):
         ai_reply = result['candidates'][0]['content']['parts'][0]['text']
         bot.reply_to(message, ai_reply)
         
-    except Exception as e:
+        except Exception as e:
         print(f"Ошибка: {e}")
-        bot.reply_to(message, "⚠️ Не удалось получить ответ от ИИ. Попробуйте еще раз.")
+        bot.reply_to(message, f"⚠️ Ошибка отладки: {str(e)}")
 
 if __name__ == '__main__':
     # Запускаем веб-сервер в отдельном потоке, чтобы он занимал порт для Render
