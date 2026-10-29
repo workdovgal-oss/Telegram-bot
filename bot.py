@@ -37,13 +37,17 @@ def handle_ai_message(message):
         response = requests.post(url, headers=headers, json=data)
         result = response.json()
         
+        # Проверяем, есть ли ошибка прямо в ответе Google
+        if 'error' in result:
+            error_message = result['error'].get('message', 'Неизвестная ошибка API')
+            bot.reply_to(message, f"⚠️ Ошибка Google API: {error_message}")
+            return
+            
         ai_reply = result['candidates'][0]['content']['parts'][0]['text']
         bot.reply_to(message, ai_reply)
         
     except Exception as e:
-        error_text = str(e)
-        print(f"Ошибка: {error_text}")
-        bot.reply_to(message, f"⚠️ Ошибка: {error_text}")
+        bot.reply_to(message, f"⚠️ Сбой кода: {str(e)}")
 
 if __name__ == '__main__':
     t = Thread(target=run_flask)
