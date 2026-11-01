@@ -117,16 +117,27 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
+# --- ФУНКЦИЯ УДАЛЕНИЯ (Теперь возвращает количество удаленных) ---
 def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
+    
     cursor.execute("DELETE FROM reminders WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
+    count1 = cursor.rowcount
+    
     cursor.execute("DELETE FROM recurring_tasks WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
+    count2 = cursor.rowcount
+    
     cursor.execute("DELETE FROM events WHERE user_id = %s AND title ILIKE %s", (user_id, f"%{text}%"))
+    count3 = cursor.rowcount
+    
     conn.commit()
     cursor.close()
     conn.close()
+    
+    return count1 + count2 + count3
 
+# --- ФУНКЦИИ ЧТЕНИЯ ---
 def get_reminders_by_date(user_id, date_str):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -373,6 +384,7 @@ def handle_ai_message(message):
     first_name = message.from_user.first_name or "Друг"
     add_user_to_db(message.chat.id, first_name)
 
+    # ВОЗВРАЩАЕМСЯ НА AIAI.BY
     url = "https://api.aiai.by/v1/chat/completions" 
     model_name = "gpt-4o-mini" 
 
@@ -477,7 +489,7 @@ def handle_ai_message(message):
         "2. Регулярная задача -> 'add_recurring_reminder'.\n"
         "3. Событие (дата без времени) -> 'add_event'.\n"
         "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
-        "5. Удаление -> 'delete_task'.\n"
+        "5. Удаление -> 'delete_task' (передавай точное ключевое слово).\n"
         "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
@@ -491,7 +503,6 @@ def handle_ai_message(message):
     try:
         response = requests.post(url, headers=headers, json=data, timeout=30)
         
-        # Безопасный парсинг JSON
         try:
             result = response.json()
         except Exception:
@@ -502,7 +513,6 @@ def handle_ai_message(message):
             bot.reply_to(message, f"⚠️ Ошибка API: Неверный формат ответа.")
             return
 
-        # Безопасная проверка на ошибку
         if 'error' in result:
             error_info = result['error']
             if isinstance(error_info, dict):
@@ -591,14 +601,16 @@ def handle_ai_message(message):
                 elif function_name == "delete_task":
                     del_text = arguments.get("text", "")
                     if del_text:
-                        delete_all_matching_tasks(message.chat.id, del_text)
-                        bot.reply_to(message, f"🗑️ Все задачи и события, содержащие «{del_text}», удалены.")
+                        deleted_count = delete_all_matching_tasks(message.chat.id, del_text)
+                        if deleted_count > 0:
+                            bot.reply_to(message, f"🗑️ Успешно удалено ({deleted_count}) задач/событий, содержащих «{del_text}».")
+                        else:
+                            bot.reply_to(message, f"🤷‍♂️ Я не нашел задач со словом «{del_text}». Возможно, они уже удалены или называются иначе.")
                         
                 elif function_name == "get_morning_report":
                     bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
             return
         
-        # Если нет вызовов функций, просто отвечаем текстом
         ai_reply = response_message.get("content")
         if not ai_reply:
             ai_reply = "Извините, я не смог обработать запрос."
