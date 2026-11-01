@@ -4,6 +4,7 @@ import os
 import threading
 import sqlite3
 import json
+import random # Добавили для случайных цитат
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask
@@ -12,7 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # --- НАСТРОЙКИ ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AI_API_KEY = os.getenv("AI_API_KEY")
-MY_CHAT_ID = os.getenv("MY_CHAT_ID")
+MY_CHAT_ID = os.getenv("MY_CHAT_ID") 
 
 TZ = ZoneInfo('Europe/Minsk')
 
@@ -23,6 +24,7 @@ app = Flask(__name__)
 def init_db():
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
+    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,8 +34,31 @@ def init_db():
             is_sent INTEGER DEFAULT 0
         )
     ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            first_name TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
+
+def add_user_to_db(user_id, first_name):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO users (user_id, first_name) VALUES (?, ?)", (user_id, first_name))
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, first_name FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    return users
 
 def add_reminder_to_db(user_id, text, remind_time):
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
@@ -43,10 +68,8 @@ def add_reminder_to_db(user_id, text, remind_time):
     conn.close()
 
 def get_reminders_by_date(user_id, date_str):
-    # date_str приходит в формате YYYY-MM-DD
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
-    # Ищем задачи, где дата совпадает
     cursor.execute("SELECT text, remind_time FROM reminders WHERE user_id = ? AND remind_time LIKE ? ORDER BY remind_time", (user_id, f"{date_str}%"))
     reminders = cursor.fetchall()
     conn.close()
@@ -70,31 +93,60 @@ def mark_reminder_as_sent(reminder_id):
 
 init_db()
 
+# --- БАНК ЦИТАТ ---
+QUOTES = [
+    "Работай тяжело, чтобы жить было легко!",
+    "Успех — это сумма маленьких усилий, повторяемых день за днем.",
+    "Не откладывай на завтра то, что можно сделать сегодня.",
+    "Твое будущее создается тем, что ты делаешь сегодня, а не завтра.",
+    "Каждое утро — это новый шанс изменить свою жизнь к лучшему.",
+    "Дисциплина — это мост между целями и их достижением.",
+    "Верь в себя, и все будет возможно.",
+    "Лучший способ предсказать будущее — создать его.",
+    "Сегодня отличный день, чтобы сделать что-то великое."
+]
+
 # --- УТРЕННЕЕ СООБЩЕНИЕ ---
-def generate_morning_report():
+def generate_morning_report(user_id, first_name):
     today = datetime.now(TZ)
+    today_date_str = today.strftime("%Y-%m-%d")
+    
     days_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
     months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
     
     date_str = f"{days_ru[today.weekday()]}, {today.day} {months_ru[today.month-1]} {today.year} года"
     
-    report = f"☀️ Доброе утро, Алексей! Сегодня {date_str}.\n\n"
-    report += "Цитата сегодняшнего дня: Работай тяжело, чтобы жить было легко!\n\n"
+    # 1. Шапка с датой
+    report = f"☀️ Доброе утро, {first_name}! Сегодня {date_str}.\n\n"
+    
+    # 2. Случайная цитата
+    quote = random.choice(QUOTES)
+    report += f"💡 Цитата дня: {quote}\n\n"
+    
+    # 3. Планы на день (только из базы данных)
     report += "📋 Планы на день:\n"
-    report += "- Утренняя рутина (отжимания, книга, завтрак)\n"
-    report += "- Сделать документ для Министерства\n"
-    report += "- Выезд с Руководством в Колледж на ЕДИ\n"
-    report += "- Разобрать рисунки\n\n"
-    report += "🎉 Напоминаю, что до вашего юбилея с девушкой осталось 2 недели. 15 ноября будет год. Уже придумали что подарить?"
+    reminders = get_reminders_by_date(user_id, today_date_str)
+    
+    if reminders:
+        for text, time_str in reminders:
+            short_time = time_str.split(" ")[1]
+            report += f"🔔 {short_time} — {text}\n"
+    else:
+        report += "🔹 На сегодня нет запланированных дел. Отличный день для отдыха или новых идей!\n"
+        
+    # 4. Пожелание
+    report += "\n🚀 Желаю вам хорошего и продуктивного дня! Все получится!"
     
     return report
 
 def send_morning_report():
-    if MY_CHAT_ID:
+    users = get_all_users()
+    for user_id, first_name in users:
         try:
-            bot.send_message(MY_CHAT_ID, generate_morning_report())
+            report = generate_morning_report(user_id, first_name)
+            bot.send_message(user_id, report)
         except Exception as e:
-            print(f"Ошибка отправки утреннего отчета: {e}")
+            print(f"Ошибка отправки утреннего отчета пользователю {user_id}: {e}")
 
 # --- ПРОВЕРКА НАПОМИНАНИЙ ---
 def check_reminders():
@@ -108,7 +160,7 @@ def check_reminders():
 
 # --- ПЛАНИРОВЩИК ---
 scheduler = BackgroundScheduler(timezone=TZ)
-scheduler.add_job(send_morning_report, 'cron', hour=8, minute=0)
+scheduler.add_job(send_morning_report, 'cron', hour=7, minute=0)
 scheduler.add_job(check_reminders, 'interval', minutes=1)
 scheduler.start()
 
@@ -124,7 +176,10 @@ def run_flask():
 # --- ОБРАБОТЧИКИ КОМАНД ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Я твой умный помощник.\n\n"
+    first_name = message.from_user.first_name or "Друг"
+    add_user_to_db(message.chat.id, first_name)
+    
+    bot.reply_to(message, f"Привет, {first_name}! Я твой умный помощник.\n\n"
                           "Я умею запоминать планы и напоминать о них. Просто скажи:\n"
                           "«Напомни мне завтра в 10:00 позвонить маме»\n"
                           "Или спроси:\n"
@@ -132,13 +187,17 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['test_morning'])
 def test_morning(message):
-    bot.reply_to(message, generate_morning_report())
+    first_name = message.from_user.first_name or "Друг"
+    bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
 
 # --- ОБРАБОТЧИК AI С ИНСТРУМЕНТАМИ ---
 @bot.message_handler(func=lambda message: True)
 def handle_ai_message(message):
     user_text = message.text
     
+    first_name = message.from_user.first_name or "Друг"
+    add_user_to_db(message.chat.id, first_name)
+
     url = "https://api.aiai.by/v1/chat/completions" 
     model_name = "gpt-4o-mini" 
 
@@ -155,7 +214,10 @@ def handle_ai_message(message):
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "Текст напоминания"},
-                        "time": {"type": "string", "description": "Время в формате 'YYYY-MM-DD HH:MM'. Текущее время: " + now_str}
+                        "time": {
+                            "type": "string", 
+                            "description": "Время в формате 'YYYY-MM-DD HH:MM'. ВАЖНО: Если пользователь не указал точное время, всегда ставь '07:00'. Текущее время: " + now_str
+                        }
                     },
                     "required": ["text", "time"]
                 }
@@ -174,6 +236,14 @@ def handle_ai_message(message):
                     "required": ["date"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_morning_report",
+                "description": "Возвращает текст утреннего сообщения (план на день, цитата, рутина)",
+                "parameters": {"type": "object", "properties": {}}
+            }
         }
     ]
 
@@ -185,7 +255,7 @@ def handle_ai_message(message):
     data = {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": "Ты - умный виртуальный помощник. Если пользователь просит напомнить о чем-то, используй 'add_reminder'. Если пользователь спрашивает о своих планах на сегодня или завтра, используй 'get_reminders'."},
+            {"role": "system", "content": "Ты - умный виртуальный помощник. Если пользователь просит напомнить, используй 'add_reminder' (если время не указано, ставь 07:00). Если спрашивает о планах, используй 'get_reminders'. Если спрашивает про утреннее сообщение, используй 'get_morning_report'."},
             {"role": "user", "content": user_text}
         ],
         "tools": tools,
@@ -202,7 +272,6 @@ def handle_ai_message(message):
             
         response_message = result['choices'][0]['message']
         
-        # Если нейросеть решила вызвать инструмент
         if response_message.get("tool_calls"):
             tool_call = response_message["tool_calls"][0]
             function_name = tool_call["function"]["name"]
@@ -222,15 +291,17 @@ def handle_ai_message(message):
                 if not reminders:
                     bot.reply_to(message, f"📭 На {date_str} у вас нет запланированных дел.")
                 else:
-                    # Форматируем время из базы (из '2026-11-01 15:43' делаем просто '15:43')
                     reply_text = f"📋 Ваши планы на {date_str}:\n"
                     for text, time_str in reminders:
                         short_time = time_str.split(" ")[1]
                         reply_text += f"🕒 {short_time} — {text}\n"
                     bot.reply_to(message, reply_text)
                 return
+                
+            elif function_name == "get_morning_report":
+                bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
+                return
         
-        # Если инструменты не нужны, просто отвечаем
         ai_reply = response_message.get("content", "Извините, я не смог обработать запрос.")
         bot.reply_to(message, ai_reply)
         
