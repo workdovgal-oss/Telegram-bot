@@ -31,7 +31,6 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Существующие таблицы
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
             id SERIAL PRIMARY KEY,
@@ -65,8 +64,6 @@ def init_db():
             first_name TEXT
         )
     ''')
-
-    # НОВАЯ ТАБЛИЦА ДЛЯ КАРТИНОК
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS morning_images (
             id SERIAL PRIMARY KEY,
@@ -96,6 +93,25 @@ def get_random_morning_image():
     cursor.close()
     conn.close()
     return row[0] if row else None
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ БЕЗОПАСНОЙ ОТПРАВКИ ФОТО ---
+def send_photo_safe(chat_id, image_url, caption, parse_mode='HTML'):
+    try:
+        # Скачиваем картинку сами, притворяясь браузером, чтобы обойти защиту Pinterest
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(image_url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            # Отправляем скачанные байты картинки
+            bot.send_photo(chat_id, response.content, caption=caption, parse_mode=parse_mode)
+        else:
+            raise Exception(f"Сервер картинки вернул код {response.status_code}")
+            
+    except Exception as e:
+        print(f"Ошибка загрузки фото: {e}")
+        # Если не удалось, отправляем текст и предупреждение
+        error_caption = caption + "\n\n<i>(Не удалось загрузить картинку. Возможно, ссылка устарела или защищена.)</i>"
+        bot.send_message(chat_id, error_caption, parse_mode=parse_mode)
 
 # --- ФУНКЦИИ БАЗЫ ДАННЫХ (ЗАДАЧИ) ---
 def add_user_to_db(user_id, first_name):
@@ -142,7 +158,6 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
-# --- УМНАЯ ФУНКЦИЯ УДАЛЕНИЯ (Стемминг) ---
 def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -153,12 +168,10 @@ def delete_all_matching_tasks(user_id, text):
     
     if not words:
         words = clean_text.split()
-
     if not words:
         return 0
 
     stems = list(set([word[:4].lower() for word in words if len(word) >= 3]))
-    
     if not stems:
         stems = [word.lower() for word in words]
 
@@ -270,7 +283,7 @@ QUOTES = [
     "Сегодня отличный день, чтобы сделать что-то великое."
 ]
 
-# --- УТРЕННЕЕ СООБЩЕНИЕ (С КАРТИНКОЙ) ---
+# --- УТРЕННЕЕ СООБЩЕНИЕ ---
 def generate_morning_report_text(user_id, first_name):
     today = datetime.now(TZ)
     today_date_str = today.strftime("%Y-%m-%d")
@@ -313,11 +326,7 @@ def send_morning_report():
             image_url = get_random_morning_image()
             
             if image_url:
-                try:
-                    bot.send_photo(user_id, image_url, caption=report_text, parse_mode='HTML')
-                except Exception as e:
-                    print(f"Ошибка отправки фото пользователю {user_id}: {e}. Отправляю текст.")
-                    bot.send_message(user_id, report_text, parse_mode='HTML')
+                send_photo_safe(user_id, image_url, report_text)
             else:
                 bot.send_message(user_id, report_text, parse_mode='HTML')
                 
@@ -391,12 +400,12 @@ def send_welcome(message):
         "📅 «Какие у меня планы на эту неделю?»\n"
         "❌ «Удали задачу про воду»\n\n"
         "🖼️ <b>Добавь картинку для утреннего отчёта:</b>\n"
-        "«Добавь картинку https://...»\n\n"
+        "Отправь мне фото или напиши: «Добавь картинку https://...»\n\n"
         "<i>Твоя цель — мой приоритет. Погнали к результатам! 🏆</i>"
     )
 
     try:
-        bot.send_photo(message.chat.id, photo_url, caption=caption_text, parse_mode='HTML')
+        send_photo_safe(message.chat.id, photo_url, caption_text)
     except Exception as e:
         bot.send_message(message.chat.id, caption_text, parse_mode='HTML')
 
@@ -408,11 +417,7 @@ def test_morning(message):
     image_url = get_random_morning_image()
     
     if image_url:
-        try:
-            bot.send_photo(user_id, image_url, caption=report_text, parse_mode='HTML')
-        except Exception as e:
-            print(f"Ошибка отправки фото: {e}. Отправляю текст.")
-            bot.send_message(user_id, report_text, parse_mode='HTML')
+        send_photo_safe(user_id, image_url, report_text)
     else:
         bot.send_message(user_id, report_text, parse_mode='HTML')
 
@@ -436,7 +441,7 @@ def broadcast_update(message):
     success_count = 0
     for user_id, first_name in users:
         try:
-            bot.send_photo(user_id, update_photo_url, caption=update_text, parse_mode='HTML')
+            send_photo_safe(user_id, update_photo_url, update_text)
             success_count += 1
         except Exception:
             try:
@@ -446,16 +451,15 @@ def broadcast_update(message):
                 pass
     bot.reply_to(message, f"✅ Рассылка завершена. Сообщение отправлено {success_count} пользователям.")
 
-# --- ОБРАБОТЧИК ВХОДЯЩИХ ИЗОБРАЖЕНИЙ (ДОБАВЛЕНИЕ КАРТИНОК) ---
+# --- ОБРАБОТЧИК ВХОДЯЩИХ ИЗОБРАЖЕНИЙ ---
 @bot.message_handler(content_types=['photo'])
 def handle_photo_upload(message):
     try:
-        # Берем изображение самого высокого качества
         file_info = bot.get_file(message.photo[-1].file_id)
         file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
         
         add_morning_image(file_url)
-        bot.reply_to(message, "✅ Отлично! Картинка добавлена в банк утренних изображений.")
+        bot.reply_to(message, "✅ Отлично! Картинка добавлена в банк утренних изображений. (Это самый надежный способ).")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Не удалось сохранить картинку: {str(e)}")
 
