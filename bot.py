@@ -1,18 +1,19 @@
-import os
 import telebot
 import requests
+import os
+import threading
 from flask import Flask
-from threading import Thread
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+# Получаем токены из переменных окружения Render
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+AI_API_KEY = os.getenv("AI_API_KEY") # Сюда мы положили ваш ключ sk-...
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
-def home():
-    return "Бот работает!"
+def hello_world():
+    return "Bot is working!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -20,40 +21,61 @@ def run_flask():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Бот на связи и готов общаться.")
+    bot.reply_to(message, "Привет! Я твой виртуальный помощник на базе нейросети. Чем могу помочь?")
 
 @bot.message_handler(func=lambda message: True)
 def handle_ai_message(message):
-    bot.send_chat_action(message.chat.id, 'typing')
+    user_text = message.text
+    
+    # ВАЖНО: Выберите правильный URL и модель!
+    
+    # --- ВАРИАНТ 1: Если это DeepSeek ---
+    url = "https://api.deepseek.com/v1/chat/completions"
+    model_name = "deepseek-chat"
+    
+    # --- ВАРИАНТ 2: Если это OpenAI (ChatGPT) ---
+    # url = "https://api.openai.com/v1/chat/completions"
+    # model_name = "gpt-3.5-turbo" # или "gpt-4o-mini"
+    
+    # --- ВАРИАНТ 3: Если это OpenRouter ---
+    # url = "https://openrouter.ai/api/v1/chat/completions"
+    # model_name = "openai/gpt-3.5-turbo" # (модель зависит от того, что вы выбрали)
+
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "Ты - полезный виртуальный помощник. Отвечай кратко и по делу."},
+            {"role": "user", "content": user_text}
+        ]
+    }
+    
     try:
-        host = "https://generativelanguage.googleapis.com"
-        path = "/v1beta/models/gemini-3.8-flash:generateContent"
-        url = f"{host}{path}?key={GEMINI_API_KEY}"
-        
-        headers = {'Content-Type': 'application/json'}
-        data = {
-            "contents": [{
-                "parts": [{"text": message.text}]
-            }]
-        }
-        
-        response = requests.post(url, headers=headers, json=data)
+        # Отправляем запрос
+        response = requests.post(url, headers=headers, json=data, timeout=30)
         result = response.json()
         
+        # Проверяем на ошибки
         if 'error' in result:
-            err_msg = result['error'].get('message', 'Ошибка API')
-            bot.reply_to(message, f"⚠️ Ошибка Google API: {err_msg}")
+            error_msg = result['error'].get('message', 'Неизвестная ошибка API')
+            bot.reply_to(message, f"⚠️ Ошибка API: {error_msg}")
             return
             
-        ai_reply = result['candidates'][0]['content']['parts'][0]['text']
+        # Извлекаем ответ от нейросети
+        ai_reply = result['choices'][0]['message']['content']
         bot.reply_to(message, ai_reply)
         
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Сбой кода: {str(e)}")
+        bot.reply_to(message, f"⚠️ Ошибка кода: {str(e)}")
 
-if __name__ == '__main__':
-    t = Thread(target=run_flask)
+if __name__ == "__main__":
+    # Запускаем Flask для Render
+    t = threading.Thread(target=run_flask)
     t.start()
     
-    print("Бот запущен и ждет сообщения...")
+    print("Бот запущен и слушает сообщения...")
     bot.infinity_polling()
