@@ -2,3 +2,5 @@ PyTelegramBotAPI
 requests
 flask
 apscheduler
+tzdata
+psycopg2-binary
