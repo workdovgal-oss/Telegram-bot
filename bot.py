@@ -15,25 +15,22 @@ from apscheduler.schedulers.background import BackgroundScheduler
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AI_API_KEY = os.getenv("AI_API_KEY")
 MY_CHAT_ID = os.getenv("MY_CHAT_ID") 
-DATABASE_URL = os.getenv("DATABASE_URL") # URL базы данных от Render
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 TZ = ZoneInfo('Europe/Minsk')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
-# --- ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ (PostgreSQL) ---
+# --- ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ---
 def get_db_connection():
-    # psycopg2 автоматически обрабатывает строку подключения от Render
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    return conn
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 # --- ИНИЦИАЛИЗАЦИЯ ТАБЛИЦ ---
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1. Таблица обычных напоминаний
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
             id SERIAL PRIMARY KEY,
@@ -44,7 +41,6 @@ def init_db():
         )
     ''')
     
-    # 2. Таблица повторяющихся задач
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recurring_tasks (
             id SERIAL PRIMARY KEY,
@@ -56,7 +52,6 @@ def init_db():
         )
     ''')
     
-    # 3. Таблица событий (ДР, праздники)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
@@ -66,7 +61,6 @@ def init_db():
         )
     ''')
     
-    # 4. Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -78,7 +72,7 @@ def init_db():
     cursor.close()
     conn.close()
 
-# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ---
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
 def add_user_to_db(user_id, first_name):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -123,6 +117,33 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
+# --- НОВЫЕ ФУНКЦИИ ДЛЯ УДАЛЕНИЯ ---
+def delete_reminder_from_db(user_id, text):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # Используем ILIKE для нечувствительного к регистру поиска
+    cursor.execute("DELETE FROM reminders WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def delete_recurring_from_db(user_id, text):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM recurring_tasks WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def delete_event_from_db(user_id, title):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM events WHERE user_id = %s AND title ILIKE %s", (user_id, f"%{title}%"))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# --- ФУНКЦИИ ЧТЕНИЯ ---
 def get_reminders_by_date(user_id, date_str):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -144,16 +165,19 @@ def get_events_by_date(user_id, date_str):
 def get_schedule_for_period(user_id, start_date_str, end_date_str):
     conn = get_db_connection()
     cursor = conn.cursor()
-    # В PostgreSQL даты можно сравнивать напрямую, если они в формате YYYY-MM-DD
+    
     cursor.execute("SELECT text, remind_time FROM reminders WHERE user_id = %s AND remind_time::date >= %s::date AND remind_time::date <= %s::date ORDER BY remind_time", (user_id, start_date_str, end_date_str))
     reminders = cursor.fetchall()
     
     cursor.execute("SELECT title, event_date FROM events WHERE user_id = %s AND event_date >= %s AND event_date <= %s ORDER BY event_date", (user_id, start_date_str, end_date_str))
     events = cursor.fetchall()
     
+    cursor.execute("SELECT text, next_run_time, frequency, interval FROM recurring_tasks WHERE user_id = %s AND next_run_time::date >= %s::date AND next_run_time::date <= %s::date", (user_id, start_date_str, end_date_str))
+    recurring = cursor.fetchall()
+    
     cursor.close()
     conn.close()
-    return reminders, events
+    return reminders, events, recurring
 
 def get_pending_reminders():
     conn = get_db_connection()
@@ -191,7 +215,6 @@ def mark_reminder_as_sent(reminder_id):
     cursor.close()
     conn.close()
 
-# Инициализируем БД при старте
 init_db()
 
 # --- БАНК ЦИТАТ ---
@@ -251,9 +274,8 @@ def send_morning_report():
         except Exception as e:
             print(f"Ошибка отправки утреннего отчета пользователю {user_id}: {e}")
 
-# --- ПРОВЕРКА ВСЕХ НАПОМИНАНИЙ ---
+# --- ПРОВЕРКА НАПОМИНАНИЙ ---
 def check_reminders():
-    # 1. Проверяем обычные задачи
     pending = get_pending_reminders()
     for rem_id, user_id, text in pending:
         try:
@@ -262,7 +284,6 @@ def check_reminders():
         except Exception as e:
             print(f"Ошибка отправки напоминания: {e}")
 
-    # 2. Проверяем повторяющиеся задачи
     recurring_tasks = get_pending_recurring_tasks()
     for task_id, user_id, text, next_time_str, freq, interval in recurring_tasks:
         try:
@@ -270,7 +291,9 @@ def check_reminders():
             
             current_time = datetime.strptime(next_time_str, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
             
-            if freq == "hours":
+            if freq == "minutes":
+                new_time = current_time + timedelta(minutes=interval)
+            elif freq == "hours":
                 new_time = current_time + timedelta(hours=interval)
             elif freq == "days":
                 new_time = current_time + timedelta(days=interval)
@@ -307,7 +330,6 @@ def send_welcome(message):
     add_user_to_db(message.chat.id, first_name)
     
     photo_url = "https://i.pinimg.com/736x/98/60/77/986077d1e2e12068dc276d9c027e517b.jpg"
-    
     caption_text = (
         f"<b>Привет, {first_name}!</b>\n"
         "FOCUS на связи. Я — твой помощник в мире больших целей и маленьких шагов.\n\n"
@@ -316,7 +338,8 @@ def send_welcome(message):
         "🔔 «Напомни мне завтра в 10:00 позвонить маме»\n"
         "🔄 «Напоминай мне пить воду каждые 2 часа»\n"
         "🎂 «У Друга день рождения 15 ноября»\n"
-        "📅 «Какие у меня планы на эту неделю?»\n\n"
+        "📅 «Какие у меня планы на эту неделю?»\n"
+        "❌ «Удали задачу про воду»\n\n"
         "<i>Твоя цель — мой приоритет. Погнали к результатам! 🏆</i>"
     )
 
@@ -337,9 +360,7 @@ def broadcast_update(message):
         return
 
     users = get_all_users()
-    
     update_photo_url = "https://i.pinimg.com/736x/09/33/14/093314fcaa98162712137d40580cf607.jpg"
-    
     update_text = (
         "🚀 <b>ОБНОВЛЕНИЕ!</b>\n\n"
         "Теперь ваш персональный помощник <b>FOCUS</b> может по-новому запоминать задачи. "
@@ -349,19 +370,17 @@ def broadcast_update(message):
         "И он будет присылать вам напоминание снова и снова. 🔄\n\n"
         "<i>Работаем для вас!</i>"
     )
-    
     success_count = 0
     for user_id, first_name in users:
         try:
             bot.send_photo(user_id, update_photo_url, caption=update_text, parse_mode='HTML')
             success_count += 1
-        except Exception as e:
+        except Exception:
             try:
                 bot.send_message(user_id, update_text, parse_mode='HTML')
                 success_count += 1
-            except Exception as e2:
-                print(f"Не удалось отправить обновление пользователю {user_id}: {e2}")
-            
+            except Exception:
+                pass
     bot.reply_to(message, f"✅ Рассылка завершена. Сообщение отправлено {success_count} пользователям.")
 
 # --- ОБРАБОТЧИК AI С ИНСТРУМЕНТАМИ ---
@@ -384,12 +403,12 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "add_reminder",
-                "description": "Добавляет задачу/напоминание на конкретное время на ОДИН раз",
+                "description": "Добавляет разовую задачу",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "Текст напоминания"},
-                        "time": {"type": "string", "description": "Время в формате 'YYYY-MM-DD HH:MM'. ВАЖНО: Если пользователь не указал точное время, всегда ставь '07:00'. Текущее время: " + now_str}
+                        "time": {"type": "string", "description": "Время 'YYYY-MM-DD HH:MM'. Если время не указано, ставь '07:00'. Текущее: " + now_str}
                     },
                     "required": ["text", "time"]
                 }
@@ -399,14 +418,14 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "add_recurring_reminder",
-                "description": "Добавляет ПОВТОРЯЮЩУЮСЯ задачу",
+                "description": "Добавляет регулярную задачу. ВАЖНО: Если пользователь просит добавить две разные регулярные задачи в одном сообщении, вызывай эту функцию ДВАЖДЫ.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "Текст задачи"},
-                        "start_time": {"type": "string", "description": "Время ПЕРВОГО выполнения в формате 'YYYY-MM-DD HH:MM'. Текущее время: " + now_str},
-                        "frequency": {"type": "string", "enum": ["hours", "days", "weeks"], "description": "Единица измерения частоты"},
-                        "interval": {"type": "integer", "description": "Количество единиц"}
+                        "start_time": {"type": "string", "description": "Время первого выполнения 'YYYY-MM-DD HH:MM'. Текущее: " + now_str},
+                        "frequency": {"type": "string", "enum": ["minutes", "hours", "days", "weeks"], "description": "Единица измерения"},
+                        "interval": {"type": "integer", "description": "Количество единиц (например, 2 для 'каждые 2 часа')"}
                     },
                     "required": ["text", "start_time", "frequency", "interval"]
                 }
@@ -416,12 +435,12 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "add_event",
-                "description": "Добавляет событие (день рождения, праздник)",
+                "description": "Добавляет событие (день рождения, годовщина)",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "description": "Название события"},
-                        "date": {"type": "string", "description": "Дата события 'YYYY-MM-DD'. Текущий год: " + str(now.year)}
+                        "title": {"type": "string", "description": "Название"},
+                        "date": {"type": "string", "description": "Дата 'YYYY-MM-DD'. Год: " + str(now.year)}
                     },
                     "required": ["title", "date"]
                 }
@@ -431,12 +450,12 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "get_schedule_for_period",
-                "description": "Получает расписание за период",
+                "description": "Получает расписание на период",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "start_date": {"type": "string", "description": "Начало периода 'YYYY-MM-DD'. Сегодня: " + today_date},
-                        "end_date": {"type": "string", "description": "Конец периода 'YYYY-MM-DD'. Если 'на неделю': " + next_week_date}
+                        "start_date": {"type": "string", "description": "Начало 'YYYY-MM-DD'. Сегодня: " + today_date},
+                        "end_date": {"type": "string", "description": "Конец 'YYYY-MM-DD'"}
                     },
                     "required": ["start_date", "end_date"]
                 }
@@ -445,8 +464,23 @@ def handle_ai_message(message):
         {
             "type": "function",
             "function": {
+                "name": "delete_task",
+                "description": "Удаляет задачу, напоминание или событие по ключевому слову. Используй, если пользователь просит удалить или отменить что-то.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Ключевое слово или текст задачи для поиска и удаления (например, 'пить воду', 'Саша', 'отжимания')"},
+                        "task_type": {"type": "string", "enum": ["reminder", "recurring", "event"], "description": "Тип задачи: reminder (разовая), recurring (регулярная), event (событие)"}
+                    },
+                    "required": ["text", "task_type"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_morning_report",
-                "description": "Возвращает текст утреннего сообщения",
+                "description": "Утренний отчет",
                 "parameters": {"type": "object", "properties": {}}
             }
         }
@@ -457,11 +491,12 @@ def handle_ai_message(message):
     system_instruction = (
         "Ты - умный, дружелюбный виртуальный помощник. "
         "ПРАВИЛА:\n"
-        "1. Если просят напомнить ОДИН РАЗ, используй 'add_reminder'.\n"
-        "2. Если просят повторять действие (каждые N часов, каждый день), используй 'add_recurring_reminder'.\n"
-        "3. Если называют дату без времени (ДР, праздник), используй 'add_event'.\n"
-        "4. Для вопросов о планах используй 'get_schedule_for_period'.\n"
-        "5. У тебя нет интернета. На вопросы о погоде/гороскопе придумывай творческий ответ."
+        "1. Разовое напоминание -> 'add_reminder'.\n"
+        "2. Регулярная задача -> 'add_recurring_reminder'. Если просят ДВЕ разные регулярные задачи, вызови функцию ДВАЖДЫ.\n"
+        "3. Событие (дата без времени) -> 'add_event'.\n"
+        "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
+        "5. Если просят УДАЛИТЬ задачу (например: 'убери напоминание про воду', 'отмени зарядку'), используй 'delete_task'. Определи тип (reminder, recurring, event) по смыслу.\n"
+        "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
     data = {
@@ -482,45 +517,66 @@ def handle_ai_message(message):
         response_message = result['choices'][0]['message']
         
         if response_message.get("tool_calls"):
-            tool_call = response_message["tool_calls"][0]
-            function_name = tool_call["function"]["name"]
-            arguments = json.loads(tool_call["function"]["arguments"])
-            
-            if function_name == "add_reminder":
-                add_reminder_to_db(message.chat.id, arguments.get("text"), arguments.get("time"))
-                bot.reply_to(message, f"✅ Хорошо! Я добавил разовую задачу на {arguments.get('time')}:\n{arguments.get('text')}")
-                return
+            for tool_call in response_message["tool_calls"]:
+                function_name = tool_call["function"]["name"]
+                arguments = json.loads(tool_call["function"]["arguments"])
                 
-            elif function_name == "add_recurring_reminder":
-                freq_ru = {"hours": "час(ов)", "days": "дн(я/ей)", "weeks": "недел(ь/и)"}.get(arguments.get("frequency"), arguments.get("frequency"))
-                add_recurring_to_db(message.chat.id, arguments.get("text"), arguments.get("start_time"), arguments.get("frequency"), arguments.get("interval"))
-                bot.reply_to(message, f"🔄 Отлично! Я добавил регулярную задачу:\n{arguments.get('text')}\n(Каждые {arguments.get('interval')} {freq_ru}. Первый раз: {arguments.get('start_time')})")
-                return
-                
-            elif function_name == "add_event":
-                add_event_to_db(message.chat.id, arguments.get("title"), arguments.get("date"))
-                bot.reply_to(message, f"🎉 Отлично! Я запомнил событие на {arguments.get('date')}:\n{arguments.get('title')}")
-                return
-                
-            elif function_name == "get_schedule_for_period":
-                reminders, events = get_schedule_for_period(message.chat.id, arguments.get("start_date"), arguments.get("end_date"))
-                if not reminders and not events:
-                    bot.reply_to(message, f"📭 На период с {arguments.get('start_date')} по {arguments.get('end_date')} у вас нет ни задач, ни событий.")
-                else:
-                    reply_text = f"📅 Ваше расписание с {arguments.get('start_date')} по {arguments.get('end_date')}:\n\n"
-                    if events:
-                        reply_text += "🎉 События:\n"
-                        for ev in events: reply_text += f"🎈 {ev[1]} — {ev[0]}\n"
-                        reply_text += "\n"
-                    if reminders:
-                        reply_text += "📋 Задачи:\n"
-                        for rem in reminders: reply_text += f"🔔 {rem[1]} — {rem[0]}\n"
-                    bot.reply_to(message, reply_text)
-                return
-                
-            elif function_name == "get_morning_report":
-                bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
-                return
+                if function_name == "add_reminder":
+                    add_reminder_to_db(message.chat.id, arguments.get("text"), arguments.get("time"))
+                    bot.reply_to(message, f"✅ Я добавил разовую задачу на {arguments.get('time')}:\n{arguments.get('text')}")
+                    
+                elif function_name == "add_recurring_reminder":
+                    freq_ru = {"minutes": "минут", "hours": "часов", "days": "дней", "weeks": "недель"}.get(arguments.get("frequency"), arguments.get("frequency"))
+                    add_recurring_to_db(message.chat.id, arguments.get("text"), arguments.get("start_time"), arguments.get("frequency"), arguments.get("interval"))
+                    bot.reply_to(message, f"🔄 Я добавил регулярную задачу:\n{arguments.get('text')}\n(Каждые {arguments.get('interval')} {freq_ru}. Первый раз: {arguments.get('start_time')})")
+                    
+                elif function_name == "add_event":
+                    add_event_to_db(message.chat.id, arguments.get("title"), arguments.get("date"))
+                    bot.reply_to(message, f"🎉 Я запомнил событие на {arguments.get('date')}:\n{arguments.get('title')}")
+                    
+                elif function_name == "get_schedule_for_period":
+                    reminders, events, recurring = get_schedule_for_period(message.chat.id, arguments.get("start_date"), arguments.get("end_date"))
+                    
+                    if not reminders and not events and not recurring:
+                        bot.reply_to(message, f"📭 На период с {arguments.get('start_date')} по {arguments.get('end_date')} у вас пусто.")
+                    else:
+                        reply_text = f"📅 Ваше расписание с {arguments.get('start_date')} по {arguments.get('end_date')}:\n\n"
+                        
+                        if events:
+                            reply_text += "🎉 События:\n"
+                            for ev in events: reply_text += f"🎈 {ev[1]} — {ev[0]}\n"
+                            reply_text += "\n"
+                            
+                        if reminders:
+                            reply_text += "📋 Разовые задачи:\n"
+                            for rem in reminders: reply_text += f"🔔 {rem[1]} — {rem[0]}\n"
+                            reply_text += "\n"
+                            
+                        if recurring:
+                            reply_text += "🔄 Регулярные задачи:\n"
+                            for rec in recurring:
+                                freq_ru = {"minutes": "мин", "hours": "ч", "days": "дн", "weeks": "нед"}.get(rec[2], rec[2])
+                                reply_text += f"🔁 {rec[0]} (каждые {rec[3]} {freq_ru})\n"
+                                
+                        bot.reply_to(message, reply_text)
+                        
+                elif function_name == "delete_task":
+                    del_text = arguments.get("text")
+                    del_type = arguments.get("task_type")
+                    
+                    if del_type == "reminder":
+                        delete_reminder_from_db(message.chat.id, del_text)
+                        bot.reply_to(message, f"🗑️ Разовые задачи, содержащие «{del_text}», удалены.")
+                    elif del_type == "recurring":
+                        delete_recurring_from_db(message.chat.id, del_text)
+                        bot.reply_to(message, f"🗑️ Регулярные задачи, содержащие «{del_text}», удалены.")
+                    elif del_type == "event":
+                        delete_event_from_db(message.chat.id, del_text)
+                        bot.reply_to(message, f"🗑️ События, содержащие «{del_text}», удалены.")
+                        
+                elif function_name == "get_morning_report":
+                    bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
+            return
         
         ai_reply = response_message.get("content", "Извините, я не смог обработать запрос.")
         bot.reply_to(message, ai_reply)
@@ -532,7 +588,6 @@ if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
     t.start()
     print("Бот запущен...")
-    
     import time
     while True:
         try:
