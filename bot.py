@@ -6,7 +6,7 @@ from flask import Flask
 
 # Получаем токены из переменных окружения Render
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-AI_API_KEY = os.getenv("AI_API_KEY") # Сюда мы положили ваш ключ sk-...
+AI_API_KEY = os.getenv("AI_API_KEY") 
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
@@ -21,25 +21,19 @@ def run_flask():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Я твой виртуальный помощник на базе нейросети. Чем могу помочь?")
+    bot.reply_to(message, "Привет! Я твой виртуальный помощник на базе AIAI.BY. Чем могу помочь?")
 
 @bot.message_handler(func=lambda message: True)
 def handle_ai_message(message):
     user_text = message.text
     
-    # ВАЖНО: Выберите правильный URL и модель!
+    # --- НАСТРОЙКИ ДЛЯ AIAI.BY ---
+    # ВАЖНО: Проверьте точный URL в документации AIAI.BY. 
+    # Обычно у OpenAI-совместимых API это /v1/chat/completions
+    url = "https://api.aiai.by/v1/chat/completions" 
     
-    # --- ВАРИАНТ 1: Если это DeepSeek ---
-    url = "https://api.deepseek.com/v1/chat/completions"
-    model_name = "deepseek-chat"
-    
-    # --- ВАРИАНТ 2: Если это OpenAI (ChatGPT) ---
-    # url = "https://api.openai.com/v1/chat/completions"
-    # model_name = "gpt-3.5-turbo" # или "gpt-4o-mini"
-    
-    # --- ВАРИАНТ 3: Если это OpenRouter ---
-    # url = "https://openrouter.ai/api/v1/chat/completions"
-    # model_name = "openai/gpt-3.5-turbo" # (модель зависит от того, что вы выбрали)
+    # Укажите модель, к которой у вас есть доступ на AIAI.BY (например, gpt-4o-mini, deepseek-chat и т.д.)
+    model_name = "gpt-4o-mini" 
 
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
@@ -55,17 +49,14 @@ def handle_ai_message(message):
     }
     
     try:
-        # Отправляем запрос
         response = requests.post(url, headers=headers, json=data, timeout=30)
         result = response.json()
         
-        # Проверяем на ошибки
         if 'error' in result:
             error_msg = result['error'].get('message', 'Неизвестная ошибка API')
             bot.reply_to(message, f"⚠️ Ошибка API: {error_msg}")
             return
             
-        # Извлекаем ответ от нейросети
         ai_reply = result['choices'][0]['message']['content']
         bot.reply_to(message, ai_reply)
         
@@ -73,9 +64,7 @@ def handle_ai_message(message):
         bot.reply_to(message, f"⚠️ Ошибка кода: {str(e)}")
 
 if __name__ == "__main__":
-    # Запускаем Flask для Render
     t = threading.Thread(target=run_flask)
     t.start()
-    
     print("Бот запущен и слушает сообщения...")
     bot.infinity_polling()
