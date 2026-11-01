@@ -267,7 +267,7 @@ def mark_reminder_as_sent(reminder_id):
 
 init_db()
 
-# --- БАНК ЦИТАТ (ОБНОВЛЕННЫЙ) ---
+# --- БАНК ЦИТАТ ---
 QUOTES = [
     "Работай тяжело, чтобы жить было легко!",
     "Успех — это сумма маленьких усилий, повторяемых день за днем.",
@@ -278,7 +278,6 @@ QUOTES = [
     "Верь в себя, и все будет возможно.",
     "Лучший способ предсказать будущее — создать его.",
     "Сегодня отличный день, чтобы сделать что-то великое.",
-    # Твои новые цитаты:
     "Неудача — это возможность начать заново, но уже более мудро. — Генри Форд",
     "Вдохновение приходит только во время работы. — Габриэль Гарсиа Маркес",
     "Постановка целей — это первый шаг к превращению невидимого в видимое. — Тони Роббинс",
@@ -670,28 +669,76 @@ def handle_ai_message(message):
                     bot.reply_to(message, f"🎉 Я запомнил событие на {arguments.get('date')}:\n{arguments.get('title')}")
                     
                 elif function_name == "get_schedule_for_period":
-                    reminders, events, recurring = get_schedule_for_period(message.chat.id, arguments.get("start_date", today_date), arguments.get("end_date", today_date))
+                    start_d = arguments.get("start_date", today_date)
+                    end_d = arguments.get("end_date", today_date)
+                    reminders, events, recurring = get_schedule_for_period(message.chat.id, start_d, end_d)
                     
                     if not reminders and not events and not recurring:
-                        bot.reply_to(message, f"📭 На период с {arguments.get('start_date')} по {arguments.get('end_date')} у вас пусто.")
+                        bot.reply_to(message, f"📭 На период с {start_d} по {end_d} у вас пусто.")
                     else:
-                        reply_text = f"📅 Ваше расписание с {arguments.get('start_date')} по {arguments.get('end_date')}:\n\n"
+                        # Красивое форматирование даты
+                        if start_d == end_d:
+                            try:
+                                dt = datetime.strptime(start_d, "%Y-%m-%d")
+                                days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+                                months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+                                date_title = f"на {days_ru[dt.weekday()]} {dt.day} {months_ru[dt.month-1]} {dt.year} года"
+                            except Exception:
+                                date_title = f"с {start_d} по {end_d}"
+                        else:
+                            date_title = f"с {start_d} по {end_d}"
+
+                        reply_text = f"📅 Ваше расписание {date_title}:\n\n"
                         
                         if events:
                             reply_text += "🎉 События:\n"
-                            for ev in events: reply_text += f"🎈 {ev[1]} — {ev[0]}\n"
+                            for ev in events: 
+                                reply_text += f"🎈 {ev[1]} — {ev[0]}\n"
                             reply_text += "\n"
                             
                         if reminders:
                             reply_text += "📋 Разовые задачи:\n"
-                            for rem in reminders: reply_text += f"🔔 {rem[1]} — {rem[0]}\n"
+                            for i, rem in enumerate(reminders, 1):
+                                # Берем только время из "YYYY-MM-DD HH:MM"
+                                time_part = rem[1].split(" ")[1] if " " in rem[1] else ""
+                                time_str = f" ({time_part})" if time_part else ""
+                                reply_text += f"{i}) {rem[0]}{time_str}\n"
                             reply_text += "\n"
                             
                         if recurring:
                             reply_text += "🔄 Регулярные задачи:\n"
                             for rec in recurring:
-                                freq_ru = {"minutes": "мин", "hours": "ч", "days": "дн", "weeks": "нед"}.get(rec[2], rec[2])
-                                reply_text += f"🔁 {rec[0]} (каждые {rec[3]} {freq_ru})\n"
+                                text = rec[0]
+                                freq = rec[2]
+                                interval = rec[3]
+                                
+                                # Красиво переводим частоту
+                                if freq == "days":
+                                    if interval == 1:
+                                        freq_text = "ежедневно"
+                                    elif interval == 2:
+                                        freq_text = "через день"
+                                    else:
+                                        freq_text = f"каждые {interval} дня"
+                                elif freq == "hours":
+                                    if interval == 1:
+                                        freq_text = "каждый час"
+                                    else:
+                                        freq_text = f"каждые {interval} часа"
+                                elif freq == "weeks":
+                                    if interval == 1:
+                                        freq_text = "еженедельно"
+                                    else:
+                                        freq_text = f"каждые {interval} недели"
+                                elif freq == "minutes":
+                                    if interval == 1:
+                                        freq_text = "каждую минуту"
+                                    else:
+                                        freq_text = f"каждые {interval} минут"
+                                else:
+                                    freq_text = f"каждые {interval} {freq}"
+                                
+                                reply_text += f"— {text} ({freq_text})\n"
                                 
                         bot.reply_to(message, reply_text)
                         
