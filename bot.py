@@ -117,11 +117,9 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
-# --- ФУНКЦИИ УДАЛЕНИЯ (Ищут везде) ---
 def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Ищем совпадения во всех трех таблицах
     cursor.execute("DELETE FROM reminders WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
     cursor.execute("DELETE FROM recurring_tasks WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
     cursor.execute("DELETE FROM events WHERE user_id = %s AND title ILIKE %s", (user_id, f"%{text}%"))
@@ -129,7 +127,6 @@ def delete_all_matching_tasks(user_id, text):
     cursor.close()
     conn.close()
 
-# --- ФУНКЦИИ ЧТЕНИЯ ---
 def get_reminders_by_date(user_id, date_str):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -404,14 +401,14 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "add_recurring_reminder",
-                "description": "Добавляет регулярную задачу. ВАЖНО: Если пользователь просит добавить две разные регулярные задачи в одном сообщении, вызывай эту функцию ДВАЖДЫ.",
+                "description": "Добавляет регулярную задачу.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "Текст задачи"},
                         "start_time": {"type": "string", "description": "Время первого выполнения 'YYYY-MM-DD HH:MM'. Текущее: " + now_str},
                         "frequency": {"type": "string", "enum": ["minutes", "hours", "days", "weeks"], "description": "Единица измерения"},
-                        "interval": {"type": "integer", "description": "Количество единиц (например, 2 для 'каждые 2 часа')"}
+                        "interval": {"type": "integer", "description": "Количество единиц"}
                     },
                     "required": ["text", "start_time", "frequency", "interval"]
                 }
@@ -451,11 +448,11 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "delete_task",
-                "description": "Удаляет задачу, напоминание или событие по ключевому слову. Используй, если пользователь просит удалить или отменить что-то.",
+                "description": "Удаляет задачу по ключевому слову",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "Ключевое слово или текст задачи для поиска и удаления (например, 'пить воду', 'Саша', 'отжимания')"}
+                        "text": {"type": "string", "description": "Ключевое слово для поиска и удаления"}
                     },
                     "required": ["text"]
                 }
@@ -477,10 +474,10 @@ def handle_ai_message(message):
         "Ты - умный, дружелюбный виртуальный помощник. "
         "ПРАВИЛА:\n"
         "1. Разовое напоминание -> 'add_reminder'.\n"
-        "2. Регулярная задача -> 'add_recurring_reminder'. Если просят ДВЕ разные регулярные задачи, вызови функцию ДВАЖДЫ.\n"
+        "2. Регулярная задача -> 'add_recurring_reminder'.\n"
         "3. Событие (дата без времени) -> 'add_event'.\n"
         "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
-        "5. Если просят УДАЛИТЬ задачу (например: 'убери напоминание про воду', 'отмени зарядку'), используй 'delete_task'. Просто передай ключевое слово.\n"
+        "5. Удаление -> 'delete_task'.\n"
         "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
@@ -493,28 +490,65 @@ def handle_ai_message(message):
     
     try:
         response = requests.post(url, headers=headers, json=data, timeout=30)
-        result = response.json()
         
-        if 'error' in result:
-            bot.reply_to(message, f"⚠️ Ошибка API: {result['error'].get('message')}")
+        # Безопасный парсинг JSON
+        try:
+            result = response.json()
+        except Exception:
+            bot.reply_to(message, f"⚠️ Ошибка API: Сервер вернул некорректный ответ (не JSON). Код: {response.status_code}")
             return
-            
-        response_message = result['choices'][0]['message']
+
+        if not isinstance(result, dict):
+            bot.reply_to(message, f"⚠️ Ошибка API: Неверный формат ответа.")
+            return
+
+        # Безопасная проверка на ошибку
+        if 'error' in result:
+            error_info = result['error']
+            if isinstance(error_info, dict):
+                error_msg = error_info.get('message', 'Неизвестная ошибка')
+            else:
+                error_msg = str(error_info)
+            bot.reply_to(message, f"⚠️ Ошибка API: {error_msg}")
+            return
+
+        choices = result.get('choices', [])
+        if not choices:
+            bot.reply_to(message, "⚠️ Ошибка API: Пустой ответ от нейросети.")
+            return
+
+        response_message = choices[0].get('message', {})
+        if not isinstance(response_message, dict):
+            bot.reply_to(message, "⚠️ Ошибка API: Некорректное сообщение.")
+            return
         
-        if response_message.get("tool_calls"):
-            for tool_call in response_message["tool_calls"]:
-                function_name = tool_call["function"]["name"]
+        tool_calls = response_message.get("tool_calls", [])
+        
+        if tool_calls and isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict) or "function" not in tool_call:
+                    continue
                 
-                # ЗАЩИТА ОТ ОШИБКИ 'str' object has no attribute 'get'
-                raw_args = tool_call["function"].get("arguments", "{}")
-                try:
-                    arguments = json.loads(raw_args)
-                except Exception:
-                    arguments = {}
+                function_info = tool_call["function"]
+                if not isinstance(function_info, dict):
+                    continue
                     
+                function_name = function_info.get("name", "")
+                raw_args = function_info.get("arguments", "{}")
+                
+                if isinstance(raw_args, str):
+                    try:
+                        arguments = json.loads(raw_args)
+                    except Exception:
+                        arguments = {}
+                elif isinstance(raw_args, dict):
+                    arguments = raw_args
+                else:
+                    arguments = {}
+                
                 if not isinstance(arguments, dict):
                     arguments = {}
-                
+
                 if function_name == "add_reminder":
                     add_reminder_to_db(message.chat.id, arguments.get("text", ""), arguments.get("time", ""))
                     bot.reply_to(message, f"✅ Я добавил разовую задачу на {arguments.get('time')}:\n{arguments.get('text')}")
@@ -529,7 +563,7 @@ def handle_ai_message(message):
                     bot.reply_to(message, f"🎉 Я запомнил событие на {arguments.get('date')}:\n{arguments.get('title')}")
                     
                 elif function_name == "get_schedule_for_period":
-                    reminders, events, recurring = get_schedule_for_period(message.chat.id, arguments.get("start_date"), arguments.get("end_date"))
+                    reminders, events, recurring = get_schedule_for_period(message.chat.id, arguments.get("start_date", today_date), arguments.get("end_date", today_date))
                     
                     if not reminders and not events and not recurring:
                         bot.reply_to(message, f"📭 На период с {arguments.get('start_date')} по {arguments.get('end_date')} у вас пусто.")
@@ -564,7 +598,11 @@ def handle_ai_message(message):
                     bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
             return
         
-        ai_reply = response_message.get("content", "Извините, я не смог обработать запрос.")
+        # Если нет вызовов функций, просто отвечаем текстом
+        ai_reply = response_message.get("content")
+        if not ai_reply:
+            ai_reply = "Извините, я не смог обработать запрос."
+        
         bot.reply_to(message, ai_reply)
         
     except Exception as e:
