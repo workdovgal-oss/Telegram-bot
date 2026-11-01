@@ -117,25 +117,45 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
-# --- ФУНКЦИЯ УДАЛЕНИЯ (Теперь возвращает количество удаленных) ---
+# --- УМНАЯ ФУНКЦИЯ УДАЛЕНИЯ (Ищет по отдельным словам) ---
 def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
+    total_deleted = 0
+
+    # Разбиваем текст на слова (убираем знаки препинания), берем слова длиннее 2 букв
+    clean_text = text.replace('!', '').replace(',', '').replace('.', '').replace('?', '')
+    words = [word for word in clean_text.split() if len(word) > 2]
     
-    cursor.execute("DELETE FROM reminders WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
-    count1 = cursor.rowcount
-    
-    cursor.execute("DELETE FROM recurring_tasks WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
-    count2 = cursor.rowcount
-    
-    cursor.execute("DELETE FROM events WHERE user_id = %s AND title ILIKE %s", (user_id, f"%{text}%"))
-    count3 = cursor.rowcount
-    
+    # Если слов длиннее 2 букв нет (например, "пить чай"), берем все слова
+    if not words:
+        words = clean_text.split()
+
+    if not words:
+        return 0
+
+    # Формируем SQL: ищем, если в тексте есть ХОТЯ БЫ ОДНО из введенных слов (OR)
+    conditions = " OR ".join(["text ILIKE %s" for _ in words])
+    params = [user_id] + [f"%{word}%" for word in words]
+
+    # Удаляем из разовых задач
+    cursor.execute(f"DELETE FROM reminders WHERE user_id = %s AND ({conditions})", params)
+    total_deleted += cursor.rowcount
+
+    # Удаляем из регулярных задач
+    cursor.execute(f"DELETE FROM recurring_tasks WHERE user_id = %s AND ({conditions})", params)
+    total_deleted += cursor.rowcount
+
+    # Удаляем из событий (колонка title)
+    conditions_events = " OR ".join(["title ILIKE %s" for _ in words])
+    cursor.execute(f"DELETE FROM events WHERE user_id = %s AND ({conditions_events})", params)
+    total_deleted += cursor.rowcount
+
     conn.commit()
     cursor.close()
     conn.close()
-    
-    return count1 + count2 + count3
+
+    return total_deleted
 
 # --- ФУНКЦИИ ЧТЕНИЯ ---
 def get_reminders_by_date(user_id, date_str):
@@ -384,7 +404,6 @@ def handle_ai_message(message):
     first_name = message.from_user.first_name or "Друг"
     add_user_to_db(message.chat.id, first_name)
 
-    # ВОЗВРАЩАЕМСЯ НА AIAI.BY
     url = "https://api.aiai.by/v1/chat/completions" 
     model_name = "gpt-4o-mini" 
 
@@ -489,7 +508,7 @@ def handle_ai_message(message):
         "2. Регулярная задача -> 'add_recurring_reminder'.\n"
         "3. Событие (дата без времени) -> 'add_event'.\n"
         "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
-        "5. Удаление -> 'delete_task' (передавай точное ключевое слово).\n"
+        "5. Удаление -> 'delete_task' (передавай ключевое слово, например 'вода', 'отжимания', 'Саша').\n"
         "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
