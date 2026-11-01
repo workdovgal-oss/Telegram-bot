@@ -117,28 +117,14 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
-# --- НОВЫЕ ФУНКЦИИ ДЛЯ УДАЛЕНИЯ ---
-def delete_reminder_from_db(user_id, text):
+# --- ФУНКЦИИ УДАЛЕНИЯ (Ищут везде) ---
+def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Используем ILIKE для нечувствительного к регистру поиска
+    # Ищем совпадения во всех трех таблицах
     cursor.execute("DELETE FROM reminders WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-def delete_recurring_from_db(user_id, text):
-    conn = get_db_connection()
-    cursor = conn.cursor()
     cursor.execute("DELETE FROM recurring_tasks WHERE user_id = %s AND text ILIKE %s", (user_id, f"%{text}%"))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-def delete_event_from_db(user_id, title):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM events WHERE user_id = %s AND title ILIKE %s", (user_id, f"%{title}%"))
+    cursor.execute("DELETE FROM events WHERE user_id = %s AND title ILIKE %s", (user_id, f"%{text}%"))
     conn.commit()
     cursor.close()
     conn.close()
@@ -469,10 +455,9 @@ def handle_ai_message(message):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "Ключевое слово или текст задачи для поиска и удаления (например, 'пить воду', 'Саша', 'отжимания')"},
-                        "task_type": {"type": "string", "enum": ["reminder", "recurring", "event"], "description": "Тип задачи: reminder (разовая), recurring (регулярная), event (событие)"}
+                        "text": {"type": "string", "description": "Ключевое слово или текст задачи для поиска и удаления (например, 'пить воду', 'Саша', 'отжимания')"}
                     },
-                    "required": ["text", "task_type"]
+                    "required": ["text"]
                 }
             }
         },
@@ -495,7 +480,7 @@ def handle_ai_message(message):
         "2. Регулярная задача -> 'add_recurring_reminder'. Если просят ДВЕ разные регулярные задачи, вызови функцию ДВАЖДЫ.\n"
         "3. Событие (дата без времени) -> 'add_event'.\n"
         "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
-        "5. Если просят УДАЛИТЬ задачу (например: 'убери напоминание про воду', 'отмени зарядку'), используй 'delete_task'. Определи тип (reminder, recurring, event) по смыслу.\n"
+        "5. Если просят УДАЛИТЬ задачу (например: 'убери напоминание про воду', 'отмени зарядку'), используй 'delete_task'. Просто передай ключевое слово.\n"
         "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
@@ -519,19 +504,28 @@ def handle_ai_message(message):
         if response_message.get("tool_calls"):
             for tool_call in response_message["tool_calls"]:
                 function_name = tool_call["function"]["name"]
-                arguments = json.loads(tool_call["function"]["arguments"])
+                
+                # ЗАЩИТА ОТ ОШИБКИ 'str' object has no attribute 'get'
+                raw_args = tool_call["function"].get("arguments", "{}")
+                try:
+                    arguments = json.loads(raw_args)
+                except Exception:
+                    arguments = {}
+                    
+                if not isinstance(arguments, dict):
+                    arguments = {}
                 
                 if function_name == "add_reminder":
-                    add_reminder_to_db(message.chat.id, arguments.get("text"), arguments.get("time"))
+                    add_reminder_to_db(message.chat.id, arguments.get("text", ""), arguments.get("time", ""))
                     bot.reply_to(message, f"✅ Я добавил разовую задачу на {arguments.get('time')}:\n{arguments.get('text')}")
                     
                 elif function_name == "add_recurring_reminder":
                     freq_ru = {"minutes": "минут", "hours": "часов", "days": "дней", "weeks": "недель"}.get(arguments.get("frequency"), arguments.get("frequency"))
-                    add_recurring_to_db(message.chat.id, arguments.get("text"), arguments.get("start_time"), arguments.get("frequency"), arguments.get("interval"))
+                    add_recurring_to_db(message.chat.id, arguments.get("text", ""), arguments.get("start_time", ""), arguments.get("frequency", ""), arguments.get("interval", 1))
                     bot.reply_to(message, f"🔄 Я добавил регулярную задачу:\n{arguments.get('text')}\n(Каждые {arguments.get('interval')} {freq_ru}. Первый раз: {arguments.get('start_time')})")
                     
                 elif function_name == "add_event":
-                    add_event_to_db(message.chat.id, arguments.get("title"), arguments.get("date"))
+                    add_event_to_db(message.chat.id, arguments.get("title", ""), arguments.get("date", ""))
                     bot.reply_to(message, f"🎉 Я запомнил событие на {arguments.get('date')}:\n{arguments.get('title')}")
                     
                 elif function_name == "get_schedule_for_period":
@@ -561,18 +555,10 @@ def handle_ai_message(message):
                         bot.reply_to(message, reply_text)
                         
                 elif function_name == "delete_task":
-                    del_text = arguments.get("text")
-                    del_type = arguments.get("task_type")
-                    
-                    if del_type == "reminder":
-                        delete_reminder_from_db(message.chat.id, del_text)
-                        bot.reply_to(message, f"🗑️ Разовые задачи, содержащие «{del_text}», удалены.")
-                    elif del_type == "recurring":
-                        delete_recurring_from_db(message.chat.id, del_text)
-                        bot.reply_to(message, f"🗑️ Регулярные задачи, содержащие «{del_text}», удалены.")
-                    elif del_type == "event":
-                        delete_event_from_db(message.chat.id, del_text)
-                        bot.reply_to(message, f"🗑️ События, содержащие «{del_text}», удалены.")
+                    del_text = arguments.get("text", "")
+                    if del_text:
+                        delete_all_matching_tasks(message.chat.id, del_text)
+                        bot.reply_to(message, f"🗑️ Все задачи и события, содержащие «{del_text}», удалены.")
                         
                 elif function_name == "get_morning_report":
                     bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
