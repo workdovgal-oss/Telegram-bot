@@ -25,7 +25,7 @@ def init_db():
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
     
-    # Таблица напоминаний (задачи на время)
+    # 1. Таблица обычных напоминаний
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +36,19 @@ def init_db():
         )
     ''')
     
-    # Таблица событий (ДР, праздники, годовщины)
+    # 2. Таблица повторяющихся задач
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS recurring_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            text TEXT,
+            next_run_time TEXT,
+            frequency TEXT, 
+            interval INTEGER
+        )
+    ''')
+    
+    # 3. Таблица событий
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +58,7 @@ def init_db():
         )
     ''')
     
-    # Таблица пользователей
+    # 4. Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -76,6 +88,16 @@ def add_reminder_to_db(user_id, text, remind_time):
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("INSERT INTO reminders (user_id, text, remind_time) VALUES (?, ?, ?)", (user_id, text, remind_time))
+    conn.commit()
+    conn.close()
+
+def add_recurring_to_db(user_id, text, next_run_time, frequency, interval):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO recurring_tasks (user_id, text, next_run_time, frequency, interval) VALUES (?, ?, ?, ?, ?)", 
+        (user_id, text, next_run_time, frequency, interval)
+    )
     conn.commit()
     conn.close()
 
@@ -123,6 +145,22 @@ def get_pending_reminders():
     reminders = cursor.fetchall()
     conn.close()
     return reminders
+
+def get_pending_recurring_tasks():
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    cursor.execute("SELECT id, user_id, text, next_run_time, frequency, interval FROM recurring_tasks WHERE next_run_time <= ?", (now_str,))
+    tasks = cursor.fetchall()
+    conn.close()
+    return tasks
+
+def update_recurring_task_time(task_id, new_time):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE recurring_tasks SET next_run_time = ? WHERE id = ?", (new_time, task_id))
+    conn.commit()
+    conn.close()
 
 def mark_reminder_as_sent(reminder_id):
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
@@ -190,8 +228,9 @@ def send_morning_report():
         except Exception as e:
             print(f"Ошибка отправки утреннего отчета пользователю {user_id}: {e}")
 
-# --- ПРОВЕРКА НАПОМИНАНИЙ ---
+# --- ПРОВЕРКА ВСЕХ НАПОМИНАНИЙ ---
 def check_reminders():
+    # 1. Проверяем обычные задачи
     pending = get_pending_reminders()
     for rem_id, user_id, text in pending:
         try:
@@ -199,6 +238,29 @@ def check_reminders():
             mark_reminder_as_sent(rem_id)
         except Exception as e:
             print(f"Ошибка отправки напоминания: {e}")
+
+    # 2. Проверяем повторяющиеся задачи
+    recurring_tasks = get_pending_recurring_tasks()
+    for task_id, user_id, text, next_time_str, freq, interval in recurring_tasks:
+        try:
+            bot.send_message(user_id, f"🔄 Регулярная задача:\n{text}")
+            
+            current_time = datetime.strptime(next_time_str, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+            
+            if freq == "hours":
+                new_time = current_time + timedelta(hours=interval)
+            elif freq == "days":
+                new_time = current_time + timedelta(days=interval)
+            elif freq == "weeks":
+                new_time = current_time + timedelta(weeks=interval)
+            else:
+                new_time = current_time + timedelta(days=1)
+                
+            new_time_str = new_time.strftime("%Y-%m-%d %H:%M")
+            update_recurring_task_time(task_id, new_time_str)
+            
+        except Exception as e:
+            print(f"Ошибка обработки повторяющейся задачи: {e}")
 
 # --- ПЛАНИРОВЩИК ---
 scheduler = BackgroundScheduler(timezone=TZ)
@@ -221,33 +283,69 @@ def send_welcome(message):
     first_name = message.from_user.first_name or "Друг"
     add_user_to_db(message.chat.id, first_name)
     
-    # Ссылка на картинку из Pinterest
     photo_url = "https://i.pinimg.com/736x/98/60/77/986077d1e2e12068dc276d9c027e517b.jpg"
     
-    # Текст сообщения с HTML-разметкой
     caption_text = (
         f"<b>Привет, {first_name}!</b>\n"
         "FOCUS на связи. Я — твой помощник в мире больших целей и маленьких шагов.\n\n"
         "Моя задача — чтобы ты не просто мечтал, а действовал. Я запоминаю твои планы, напоминаю о важном и помогаю держать фокус. Всё, что тебе нужно, — сказать мне.\n\n"
         "<b>Начни прямо сейчас:</b>\n"
         "🔔 «Напомни мне завтра в 10:00 позвонить маме»\n"
+        "🔄 «Напоминай мне пить воду каждые 2 часа»\n"
         "🎂 «У Друга день рождения 15 ноября»\n"
         "📅 «Какие у меня планы на эту неделю?»\n\n"
         "<i>Твоя цель — мой приоритет. Погнали к результатам! 🏆</i>"
     )
 
     try:
-        # Отправляем картинку с текстом
         bot.send_photo(message.chat.id, photo_url, caption=caption_text, parse_mode='HTML')
     except Exception as e:
-        # Если картинка не загрузится (например, Pinterest заблокирует), отправим просто текст
-        print(f"Ошибка загрузки фото: {e}")
         bot.send_message(message.chat.id, caption_text, parse_mode='HTML')
 
 @bot.message_handler(commands=['test_morning'])
 def test_morning(message):
     first_name = message.from_user.first_name or "Друг"
     bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
+
+# ОБНОВЛЕННАЯ КОМАНДА ДЛЯ РАССЫЛКИ С КАРТИНКОЙ
+@bot.message_handler(commands=['send_update'])
+def broadcast_update(message):
+    # Проверка, чтобы рассылку мог делать только владелец
+    if MY_CHAT_ID and str(message.chat.id) != MY_CHAT_ID:
+        bot.reply_to(message, "⛔ У вас нет прав на эту команду.")
+        return
+
+    users = get_all_users()
+    
+    # Новая картинка для обновления
+    update_photo_url = "https://i.pinimg.com/736x/09/33/14/093314fcaa98162712137d40580cf607.jpg"
+    
+    update_text = (
+        "🚀 <b>ОБНОВЛЕНИЕ!</b>\n\n"
+        "Теперь ваш персональный помощник <b>FOCUS</b> может по-новому запоминать задачи. "
+        "Ему можно не просто ставить однотипные задачи по типу «напомнить позвонить другу» или «выполнить задачу завтра вечером», "
+        "а использовать его для своей утренней или вечерней рутины.\n\n"
+        "Напиши ему: «напоминай мне пить воду каждые 2 часа», или «напоминай мне каждое утро отжиматься». "
+        "И он будет присылать вам напоминание снова и снова. 🔄\n\n"
+        "<i>Работаем для вас!</i>"
+    )
+    
+    success_count = 0
+    for user_id, first_name in users:
+        try:
+            # Пытаемся отправить картинку с текстом
+            bot.send_photo(user_id, update_photo_url, caption=update_text, parse_mode='HTML')
+            success_count += 1
+        except Exception as e:
+            print(f"Не удалось отправить фото обновления пользователю {user_id}: {e}")
+            # Если фото не загрузилось, отправляем просто текст
+            try:
+                bot.send_message(user_id, update_text, parse_mode='HTML')
+                success_count += 1
+            except Exception as e2:
+                print(f"Не удалось отправить текст обновления пользователю {user_id}: {e2}")
+            
+    bot.reply_to(message, f"✅ Рассылка завершена. Сообщение отправлено {success_count} пользователям.")
 
 # --- ОБРАБОТЧИК AI С ИНСТРУМЕНТАМИ ---
 @bot.message_handler(func=lambda message: True)
@@ -270,7 +368,7 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "add_reminder",
-                "description": "Добавляет задачу/напоминание на конкретное время (что-то сделать)",
+                "description": "Добавляет задачу/напоминание на конкретное время на ОДИН раз (например, 'завтра в 10:00 купить хлеб')",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -287,12 +385,39 @@ def handle_ai_message(message):
         {
             "type": "function",
             "function": {
+                "name": "add_recurring_reminder",
+                "description": "Добавляет ПОВТОРЯЮЩУЮСЯ задачу (например, 'каждый день', 'каждую пятницу', 'каждые 2 часа')",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Текст задачи (например, 'выпить воду', 'сделать зарядку')"},
+                        "start_time": {
+                            "type": "string", 
+                            "description": "Время ПЕРВОГО выполнения в формате 'YYYY-MM-DD HH:MM'. Если не указано, используй текущее время + интервал. Текущее время: " + now_str
+                        },
+                        "frequency": {
+                            "type": "string", 
+                            "enum": ["hours", "days", "weeks"],
+                            "description": "Единица измерения частоты: 'hours' (часы), 'days' (дни), 'weeks' (недели)"
+                        },
+                        "interval": {
+                            "type": "integer",
+                            "description": "Количество единиц. Например, для 'каждые 2 часа' — frequency='hours', interval=2. Для 'каждый день' — frequency='days', interval=1."
+                        }
+                    },
+                    "required": ["text", "start_time", "frequency", "interval"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "add_event",
                 "description": "Добавляет событие (день рождения, праздник, годовщина). Используй это, когда пользователь называет дату, но не просит напомнить в конкретное время.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "description": "Название события (например, 'День рождения Саши')"},
+                        "title": {"type": "string", "description": "Название события"},
                         "date": {
                             "type": "string", 
                             "description": "Дата события в формате 'YYYY-MM-DD'. Текущий год: " + str(now.year)
@@ -306,12 +431,12 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "get_schedule_for_period",
-                "description": "Получает расписание (и задачи, и события) за определенный период. Используй это для вопросов 'что на неделе', 'планы на завтра' и т.д.",
+                "description": "Получает расписание (задачи и события) за период.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "start_date": {"type": "string", "description": "Начало периода 'YYYY-MM-DD'. Сегодня: " + today_date},
-                        "end_date": {"type": "string", "description": "Конец периода 'YYYY-MM-DD'. Если спрашивают 'на неделю', ставь: " + next_week_date}
+                        "end_date": {"type": "string", "description": "Конец периода 'YYYY-MM-DD'. Если 'на неделю': " + next_week_date}
                     },
                     "required": ["start_date", "end_date"]
                 }
@@ -321,7 +446,7 @@ def handle_ai_message(message):
             "type": "function",
             "function": {
                 "name": "get_morning_report",
-                "description": "Возвращает текст утреннего сообщения (план на день, цитата, рутина)",
+                "description": "Возвращает текст утреннего сообщения",
                 "parameters": {"type": "object", "properties": {}}
             }
         }
@@ -333,13 +458,13 @@ def handle_ai_message(message):
     }
     
     system_instruction = (
-        "Ты - умный, дружелюбный и креативный виртуальный помощник. "
+        "Ты - умный, дружелюбный виртуальный помощник. "
         "ПРАВИЛА:\n"
-        "1. Если просят напомнить в конкретное время ('в 10 утра', 'в обед'), используй 'add_reminder'.\n"
-        "2. Если говорят о дате без времени ('23 декабря ДР у Саши', '14 февраля праздник'), используй 'add_event'.\n"
-        "3. Если спрашивают о планах ('что на сегодня', 'что на неделе', 'есть ли события'), используй 'get_schedule_for_period'.\n"
-        "4. У тебя нет интернета. Если спрашивают о гороскопе/погоде, придумай позитивный творческий ответ.\n"
-        "5. Обращайся к пользователю по имени, если оно известно."
+        "1. Если просят напомнить ОДИН РАЗ, используй 'add_reminder'.\n"
+        "2. Если просят повторять действие (каждые N часов, каждый день, по пятницам), используй 'add_recurring_reminder'. Если день недели указан ('по пятницам'), вычисли ближайшую дату для первого раза и поставь frequency='weeks', interval=1.\n"
+        "3. Если называют дату без времени (ДР, праздник), используй 'add_event'.\n"
+        "4. Для вопросов о планах используй 'get_schedule_for_period'.\n"
+        "5. У тебя нет интернета. На вопросы о погоде/гороскопе придумывай творческий ответ."
     )
 
     data = {
@@ -371,7 +496,19 @@ def handle_ai_message(message):
                 rem_text = arguments.get("text")
                 rem_time = arguments.get("time")
                 add_reminder_to_db(message.chat.id, rem_text, rem_time)
-                bot.reply_to(message, f"✅ Хорошо! Я добавил задачу на {rem_time}:\n{rem_text}")
+                bot.reply_to(message, f"✅ Хорошо! Я добавил разовую задачу на {rem_time}:\n{rem_text}")
+                return
+                
+            elif function_name == "add_recurring_reminder":
+                rem_text = arguments.get("text")
+                start_time = arguments.get("start_time")
+                freq = arguments.get("frequency")
+                interval = arguments.get("interval")
+                
+                add_recurring_to_db(message.chat.id, rem_text, start_time, freq, interval)
+                
+                freq_ru = {"hours": "час(ов)", "days": "дн(я/ей)", "weeks": "недел(ь/и)"}.get(freq, freq)
+                bot.reply_to(message, f"🔄 Отлично! Я добавил регулярную задачу:\n{rem_text}\n(Каждые {interval} {freq_ru}. Первый раз: {start_time})")
                 return
                 
             elif function_name == "add_event":
@@ -390,18 +527,15 @@ def handle_ai_message(message):
                     bot.reply_to(message, f"📭 На период с {start_d} по {end_d} у вас нет ни задач, ни событий.")
                 else:
                     reply_text = f"📅 Ваше расписание с {start_d} по {end_d}:\n\n"
-                    
                     if events:
                         reply_text += "🎉 События:\n"
                         for ev in events:
                             reply_text += f"🎈 {ev[1]} — {ev[0]}\n"
                         reply_text += "\n"
-                        
                     if reminders:
                         reply_text += "📋 Задачи:\n"
                         for rem in reminders:
                             reply_text += f"🔔 {rem[1]} — {rem[0]}\n"
-                    
                     bot.reply_to(message, reply_text)
                 return
                 
