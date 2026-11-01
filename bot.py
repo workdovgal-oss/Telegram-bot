@@ -36,7 +36,7 @@ def init_db():
         )
     ''')
     
-    # НОВОЕ: Таблица событий (ДР, праздники, годовщины)
+    # Таблица событий (ДР, праздники, годовщины)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +46,7 @@ def init_db():
         )
     ''')
     
+    # Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -102,15 +103,12 @@ def get_events_by_date(user_id, date_str):
     return events
 
 def get_schedule_for_period(user_id, start_date_str, end_date_str):
-    # Получаем задачи и события за период (например, на неделю)
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
     
-    # Задачи
     cursor.execute("SELECT text, remind_time FROM reminders WHERE user_id = ? AND date(remind_time) >= ? AND date(remind_time) <= ? ORDER BY remind_time", (user_id, start_date_str, end_date_str))
     reminders = cursor.fetchall()
     
-    # События
     cursor.execute("SELECT title, event_date FROM events WHERE user_id = ? AND event_date >= ? AND event_date <= ? ORDER BY event_date", (user_id, start_date_str, end_date_str))
     events = cursor.fetchall()
     
@@ -160,7 +158,6 @@ def generate_morning_report(user_id, first_name):
     
     report = f"☀️ Доброе утро, {first_name}! Сегодня {date_str}.\n\n"
     
-    # События на сегодня (ДР, праздники)
     events = get_events_by_date(user_id, today_date_str)
     if events:
         report += "🎉 События на сегодня:\n"
@@ -224,12 +221,28 @@ def send_welcome(message):
     first_name = message.from_user.first_name or "Друг"
     add_user_to_db(message.chat.id, first_name)
     
-    bot.reply_to(message, f"Привет, {first_name}! Я твой умный помощник.\n\n"
-                          "Я умею запоминать планы, события и напоминать о них. Просто скажи:\n"
-                          "«Напомни мне завтра в 10:00 позвонить маме»\n"
-                          "«У Саши день рождения 23 декабря»\n"
-                          "Или спроси:\n"
-                          "«Какие у меня планы на неделю?»")
+    # Ссылка на картинку из Pinterest
+    photo_url = "https://i.pinimg.com/736x/98/60/77/986077d1e2e12068dc276d9c027e517b.jpg"
+    
+    # Текст сообщения с HTML-разметкой
+    caption_text = (
+        f"<b>Привет, {first_name}!</b>\n"
+        "FOCUS на связи. Я — твой помощник в мире больших целей и маленьких шагов.\n\n"
+        "Моя задача — чтобы ты не просто мечтал, а действовал. Я запоминаю твои планы, напоминаю о важном и помогаю держать фокус. Всё, что тебе нужно, — сказать мне.\n\n"
+        "<b>Начни прямо сейчас:</b>\n"
+        "🔔 «Напомни мне завтра в 10:00 позвонить маме»\n"
+        "🎂 «У Друга день рождения 15 ноября»\n"
+        "📅 «Какие у меня планы на эту неделю?»\n\n"
+        "<i>Твоя цель — мой приоритет. Погнали к результатам! 🏆</i>"
+    )
+
+    try:
+        # Отправляем картинку с текстом
+        bot.send_photo(message.chat.id, photo_url, caption=caption_text, parse_mode='HTML')
+    except Exception as e:
+        # Если картинка не загрузится (например, Pinterest заблокирует), отправим просто текст
+        print(f"Ошибка загрузки фото: {e}")
+        bot.send_message(message.chat.id, caption_text, parse_mode='HTML')
 
 @bot.message_handler(commands=['test_morning'])
 def test_morning(message):
@@ -250,8 +263,6 @@ def handle_ai_message(message):
     now = datetime.now(TZ)
     now_str = now.strftime("%Y-%m-%d %H:%M")
     today_date = now.strftime("%Y-%m-%d")
-    
-    # Вычисляем дату через неделю для запросов "на неделю"
     next_week_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
 
     tools = [
@@ -389,9 +400,7 @@ def handle_ai_message(message):
                     if reminders:
                         reply_text += "📋 Задачи:\n"
                         for rem in reminders:
-                            # Извлекаем дату и время
-                            dt_str = rem[1]
-                            reply_text += f"🔔 {dt_str} — {rem[0]}\n"
+                            reply_text += f"🔔 {rem[1]} — {rem[0]}\n"
                     
                     bot.reply_to(message, reply_text)
                 return
