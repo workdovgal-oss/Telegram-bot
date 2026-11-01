@@ -4,7 +4,7 @@ import os
 import threading
 import sqlite3
 import json
-import random # Добавили для случайных цитат
+import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask
@@ -25,6 +25,7 @@ def init_db():
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
     
+    # Таблица напоминаний (задачи на время)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +33,16 @@ def init_db():
             text TEXT,
             remind_time TEXT,
             is_sent INTEGER DEFAULT 0
+        )
+    ''')
+    
+    # НОВОЕ: Таблица событий (ДР, праздники, годовщины)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            title TEXT,
+            event_date TEXT
         )
     ''')
     
@@ -67,6 +78,13 @@ def add_reminder_to_db(user_id, text, remind_time):
     conn.commit()
     conn.close()
 
+def add_event_to_db(user_id, title, event_date):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO events (user_id, title, event_date) VALUES (?, ?, ?)", (user_id, title, event_date))
+    conn.commit()
+    conn.close()
+
 def get_reminders_by_date(user_id, date_str):
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
@@ -74,6 +92,30 @@ def get_reminders_by_date(user_id, date_str):
     reminders = cursor.fetchall()
     conn.close()
     return reminders
+
+def get_events_by_date(user_id, date_str):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("SELECT title FROM events WHERE user_id = ? AND event_date = ?", (user_id, date_str))
+    events = cursor.fetchall()
+    conn.close()
+    return events
+
+def get_schedule_for_period(user_id, start_date_str, end_date_str):
+    # Получаем задачи и события за период (например, на неделю)
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    
+    # Задачи
+    cursor.execute("SELECT text, remind_time FROM reminders WHERE user_id = ? AND date(remind_time) >= ? AND date(remind_time) <= ? ORDER BY remind_time", (user_id, start_date_str, end_date_str))
+    reminders = cursor.fetchall()
+    
+    # События
+    cursor.execute("SELECT title, event_date FROM events WHERE user_id = ? AND event_date >= ? AND event_date <= ? ORDER BY event_date", (user_id, start_date_str, end_date_str))
+    events = cursor.fetchall()
+    
+    conn.close()
+    return reminders, events
 
 def get_pending_reminders():
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
@@ -116,14 +158,19 @@ def generate_morning_report(user_id, first_name):
     
     date_str = f"{days_ru[today.weekday()]}, {today.day} {months_ru[today.month-1]} {today.year} года"
     
-    # 1. Шапка с датой
     report = f"☀️ Доброе утро, {first_name}! Сегодня {date_str}.\n\n"
     
-    # 2. Случайная цитата
+    # События на сегодня (ДР, праздники)
+    events = get_events_by_date(user_id, today_date_str)
+    if events:
+        report += "🎉 События на сегодня:\n"
+        for event in events:
+            report += f"🎈 {event[0]}\n"
+        report += "\n"
+    
     quote = random.choice(QUOTES)
     report += f"💡 Цитата дня: {quote}\n\n"
     
-    # 3. Планы на день (только из базы данных)
     report += "📋 Планы на день:\n"
     reminders = get_reminders_by_date(user_id, today_date_str)
     
@@ -131,12 +178,10 @@ def generate_morning_report(user_id, first_name):
         for text, time_str in reminders:
             short_time = time_str.split(" ")[1]
             report += f"🔔 {short_time} — {text}\n"
-    else:
+    elif not events:
         report += "🔹 На сегодня нет запланированных дел. Отличный день для отдыха или новых идей!\n"
         
-    # 4. Пожелание
     report += "\n🚀 Желаю вам хорошего и продуктивного дня! Все получится!"
-    
     return report
 
 def send_morning_report():
@@ -180,10 +225,11 @@ def send_welcome(message):
     add_user_to_db(message.chat.id, first_name)
     
     bot.reply_to(message, f"Привет, {first_name}! Я твой умный помощник.\n\n"
-                          "Я умею запоминать планы и напоминать о них. Просто скажи:\n"
+                          "Я умею запоминать планы, события и напоминать о них. Просто скажи:\n"
                           "«Напомни мне завтра в 10:00 позвонить маме»\n"
+                          "«У Саши день рождения 23 декабря»\n"
                           "Или спроси:\n"
-                          "«Какие у меня планы на сегодня?»")
+                          "«Какие у меня планы на неделю?»")
 
 @bot.message_handler(commands=['test_morning'])
 def test_morning(message):
@@ -201,15 +247,19 @@ def handle_ai_message(message):
     url = "https://api.aiai.by/v1/chat/completions" 
     model_name = "gpt-4o-mini" 
 
-    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
-    today_date = datetime.now(TZ).strftime("%Y-%m-%d")
+    now = datetime.now(TZ)
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    today_date = now.strftime("%Y-%m-%d")
     
+    # Вычисляем дату через неделю для запросов "на неделю"
+    next_week_date = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+
     tools = [
         {
             "type": "function",
             "function": {
                 "name": "add_reminder",
-                "description": "Добавляет напоминание пользователю в базу данных",
+                "description": "Добавляет задачу/напоминание на конкретное время (что-то сделать)",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -226,14 +276,33 @@ def handle_ai_message(message):
         {
             "type": "function",
             "function": {
-                "name": "get_reminders",
-                "description": "Получает список всех напоминаний пользователя на конкретную дату",
+                "name": "add_event",
+                "description": "Добавляет событие (день рождения, праздник, годовщина). Используй это, когда пользователь называет дату, но не просит напомнить в конкретное время.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "date": {"type": "string", "description": "Дата в формате 'YYYY-MM-DD'. Сегодня это: " + today_date}
+                        "title": {"type": "string", "description": "Название события (например, 'День рождения Саши')"},
+                        "date": {
+                            "type": "string", 
+                            "description": "Дата события в формате 'YYYY-MM-DD'. Текущий год: " + str(now.year)
+                        }
                     },
-                    "required": ["date"]
+                    "required": ["title", "date"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_schedule_for_period",
+                "description": "Получает расписание (и задачи, и события) за определенный период. Используй это для вопросов 'что на неделе', 'планы на завтра' и т.д.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "Начало периода 'YYYY-MM-DD'. Сегодня: " + today_date},
+                        "end_date": {"type": "string", "description": "Конец периода 'YYYY-MM-DD'. Если спрашивают 'на неделю', ставь: " + next_week_date}
+                    },
+                    "required": ["start_date", "end_date"]
                 }
             }
         },
@@ -252,10 +321,20 @@ def handle_ai_message(message):
         "Content-Type": "application/json"
     }
     
+    system_instruction = (
+        "Ты - умный, дружелюбный и креативный виртуальный помощник. "
+        "ПРАВИЛА:\n"
+        "1. Если просят напомнить в конкретное время ('в 10 утра', 'в обед'), используй 'add_reminder'.\n"
+        "2. Если говорят о дате без времени ('23 декабря ДР у Саши', '14 февраля праздник'), используй 'add_event'.\n"
+        "3. Если спрашивают о планах ('что на сегодня', 'что на неделе', 'есть ли события'), используй 'get_schedule_for_period'.\n"
+        "4. У тебя нет интернета. Если спрашивают о гороскопе/погоде, придумай позитивный творческий ответ.\n"
+        "5. Обращайся к пользователю по имени, если оно известно."
+    )
+
     data = {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": "Ты - умный виртуальный помощник. Если пользователь просит напомнить, используй 'add_reminder' (если время не указано, ставь 07:00). Если спрашивает о планах, используй 'get_reminders'. Если спрашивает про утреннее сообщение, используй 'get_morning_report'."},
+            {"role": "system", "content": system_instruction},
             {"role": "user", "content": user_text}
         ],
         "tools": tools,
@@ -281,20 +360,39 @@ def handle_ai_message(message):
                 rem_text = arguments.get("text")
                 rem_time = arguments.get("time")
                 add_reminder_to_db(message.chat.id, rem_text, rem_time)
-                bot.reply_to(message, f"✅ Хорошо! Я добавил напоминание на {rem_time}:\n{rem_text}")
+                bot.reply_to(message, f"✅ Хорошо! Я добавил задачу на {rem_time}:\n{rem_text}")
                 return
                 
-            elif function_name == "get_reminders":
-                date_str = arguments.get("date")
-                reminders = get_reminders_by_date(message.chat.id, date_str)
+            elif function_name == "add_event":
+                ev_title = arguments.get("title")
+                ev_date = arguments.get("date")
+                add_event_to_db(message.chat.id, ev_title, ev_date)
+                bot.reply_to(message, f"🎉 Отлично! Я запомнил событие на {ev_date}:\n{ev_title}")
+                return
                 
-                if not reminders:
-                    bot.reply_to(message, f"📭 На {date_str} у вас нет запланированных дел.")
+            elif function_name == "get_schedule_for_period":
+                start_d = arguments.get("start_date")
+                end_d = arguments.get("end_date")
+                reminders, events = get_schedule_for_period(message.chat.id, start_d, end_d)
+                
+                if not reminders and not events:
+                    bot.reply_to(message, f"📭 На период с {start_d} по {end_d} у вас нет ни задач, ни событий.")
                 else:
-                    reply_text = f"📋 Ваши планы на {date_str}:\n"
-                    for text, time_str in reminders:
-                        short_time = time_str.split(" ")[1]
-                        reply_text += f"🕒 {short_time} — {text}\n"
+                    reply_text = f"📅 Ваше расписание с {start_d} по {end_d}:\n\n"
+                    
+                    if events:
+                        reply_text += "🎉 События:\n"
+                        for ev in events:
+                            reply_text += f"🎈 {ev[1]} — {ev[0]}\n"
+                        reply_text += "\n"
+                        
+                    if reminders:
+                        reply_text += "📋 Задачи:\n"
+                        for rem in reminders:
+                            # Извлекаем дату и время
+                            dt_str = rem[1]
+                            reply_text += f"🔔 {dt_str} — {rem[0]}\n"
+                    
                     bot.reply_to(message, reply_text)
                 return
                 
