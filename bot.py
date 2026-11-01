@@ -117,38 +117,44 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
-# --- УМНАЯ ФУНКЦИЯ УДАЛЕНИЯ (Ищет по отдельным словам) ---
+# --- УМНАЯ ФУНКЦИЯ УДАЛЕНИЯ (Стемминг - ищем по корню слова) ---
 def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
     total_deleted = 0
 
-    # Разбиваем текст на слова (убираем знаки препинания), берем слова длиннее 2 букв
-    clean_text = text.replace('!', '').replace(',', '').replace('.', '').replace('?', '')
+    # Очищаем текст от знаков препинания
+    clean_text = text.replace('!', '').replace(',', '').replace('.', '').replace('?', '').replace('"', '').replace('«', '').replace('»', '')
     words = [word for word in clean_text.split() if len(word) > 2]
     
-    # Если слов длиннее 2 букв нет (например, "пить чай"), берем все слова
     if not words:
         words = clean_text.split()
 
     if not words:
         return 0
 
-    # Формируем SQL: ищем, если в тексте есть ХОТЯ БЫ ОДНО из введенных слов (OR)
-    conditions = " OR ".join(["text ILIKE %s" for _ in words])
-    params = [user_id] + [f"%{word}%" for word in words]
+    # Отрезаем окончания (берем первые 4 буквы). "воду" -> "вод", "вода" -> "вод"
+    stems = list(set([word[:4].lower() for word in words if len(word) >= 3]))
+    
+    if not stems:
+        stems = [word.lower() for word in words]
+
+    conditions_reminders = " OR ".join(["text ILIKE %s" for _ in stems])
+    params_reminders = [user_id] + [f"%{stem}%" for stem in stems]
 
     # Удаляем из разовых задач
-    cursor.execute(f"DELETE FROM reminders WHERE user_id = %s AND ({conditions})", params)
+    cursor.execute(f"DELETE FROM reminders WHERE user_id = %s AND ({conditions_reminders})", params_reminders)
     total_deleted += cursor.rowcount
 
     # Удаляем из регулярных задач
-    cursor.execute(f"DELETE FROM recurring_tasks WHERE user_id = %s AND ({conditions})", params)
+    cursor.execute(f"DELETE FROM recurring_tasks WHERE user_id = %s AND ({conditions_reminders})", params_reminders)
     total_deleted += cursor.rowcount
 
-    # Удаляем из событий (колонка title)
-    conditions_events = " OR ".join(["title ILIKE %s" for _ in words])
-    cursor.execute(f"DELETE FROM events WHERE user_id = %s AND ({conditions_events})", params)
+    # Удаляем из событий
+    conditions_events = " OR ".join(["title ILIKE %s" for _ in stems])
+    params_events = [user_id] + [f"%{stem}%" for stem in stems]
+    
+    cursor.execute(f"DELETE FROM events WHERE user_id = %s AND ({conditions_events})", params_events)
     total_deleted += cursor.rowcount
 
     conn.commit()
@@ -508,7 +514,7 @@ def handle_ai_message(message):
         "2. Регулярная задача -> 'add_recurring_reminder'.\n"
         "3. Событие (дата без времени) -> 'add_event'.\n"
         "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
-        "5. Удаление -> 'delete_task' (передавай ключевое слово, например 'вода', 'отжимания', 'Саша').\n"
+        "5. Удаление -> 'delete_task'. Передавай ключевое слово в той форме, в которой оно в задаче (например, 'воду', а не 'вода').\n"
         "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
