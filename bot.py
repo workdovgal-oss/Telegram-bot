@@ -31,6 +31,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # Существующие таблицы
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
             id SERIAL PRIMARY KEY,
@@ -40,7 +41,6 @@ def init_db():
             is_sent INTEGER DEFAULT 0
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recurring_tasks (
             id SERIAL PRIMARY KEY,
@@ -51,7 +51,6 @@ def init_db():
             interval INTEGER
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
@@ -60,11 +59,19 @@ def init_db():
             event_date TEXT
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             first_name TEXT
+        )
+    ''')
+
+    # НОВАЯ ТАБЛИЦА ДЛЯ КАРТИНОК
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS morning_images (
+            id SERIAL PRIMARY KEY,
+            url TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -72,7 +79,25 @@ def init_db():
     cursor.close()
     conn.close()
 
-# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
+# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ (КАРТИНКИ) ---
+def add_morning_image(url):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO morning_images (url) VALUES (%s)", (url,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_random_morning_image():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT url FROM morning_images ORDER BY RANDOM() LIMIT 1")
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row[0] if row else None
+
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ (ЗАДАЧИ) ---
 def add_user_to_db(user_id, first_name):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -117,13 +142,12 @@ def add_event_to_db(user_id, title, event_date):
     cursor.close()
     conn.close()
 
-# --- УМНАЯ ФУНКЦИЯ УДАЛЕНИЯ (Стемминг - ищем по корню слова) ---
+# --- УМНАЯ ФУНКЦИЯ УДАЛЕНИЯ (Стемминг) ---
 def delete_all_matching_tasks(user_id, text):
     conn = get_db_connection()
     cursor = conn.cursor()
     total_deleted = 0
 
-    # Очищаем текст от знаков препинания
     clean_text = text.replace('!', '').replace(',', '').replace('.', '').replace('?', '').replace('"', '').replace('«', '').replace('»', '')
     words = [word for word in clean_text.split() if len(word) > 2]
     
@@ -133,7 +157,6 @@ def delete_all_matching_tasks(user_id, text):
     if not words:
         return 0
 
-    # Отрезаем окончания (берем первые 4 буквы). "воду" -> "вод", "вода" -> "вод"
     stems = list(set([word[:4].lower() for word in words if len(word) >= 3]))
     
     if not stems:
@@ -142,15 +165,12 @@ def delete_all_matching_tasks(user_id, text):
     conditions_reminders = " OR ".join(["text ILIKE %s" for _ in stems])
     params_reminders = [user_id] + [f"%{stem}%" for stem in stems]
 
-    # Удаляем из разовых задач
     cursor.execute(f"DELETE FROM reminders WHERE user_id = %s AND ({conditions_reminders})", params_reminders)
     total_deleted += cursor.rowcount
 
-    # Удаляем из регулярных задач
     cursor.execute(f"DELETE FROM recurring_tasks WHERE user_id = %s AND ({conditions_reminders})", params_reminders)
     total_deleted += cursor.rowcount
 
-    # Удаляем из событий
     conditions_events = " OR ".join(["title ILIKE %s" for _ in stems])
     params_events = [user_id] + [f"%{stem}%" for stem in stems]
     
@@ -250,8 +270,8 @@ QUOTES = [
     "Сегодня отличный день, чтобы сделать что-то великое."
 ]
 
-# --- УТРЕННЕЕ СООБЩЕНИЕ ---
-def generate_morning_report(user_id, first_name):
+# --- УТРЕННЕЕ СООБЩЕНИЕ (С КАРТИНКОЙ) ---
+def generate_morning_report_text(user_id, first_name):
     today = datetime.now(TZ)
     today_date_str = today.strftime("%Y-%m-%d")
     
@@ -289,8 +309,18 @@ def send_morning_report():
     users = get_all_users()
     for user_id, first_name in users:
         try:
-            report = generate_morning_report(user_id, first_name)
-            bot.send_message(user_id, report)
+            report_text = generate_morning_report_text(user_id, first_name)
+            image_url = get_random_morning_image()
+            
+            if image_url:
+                try:
+                    bot.send_photo(user_id, image_url, caption=report_text, parse_mode='HTML')
+                except Exception as e:
+                    print(f"Ошибка отправки фото пользователю {user_id}: {e}. Отправляю текст.")
+                    bot.send_message(user_id, report_text, parse_mode='HTML')
+            else:
+                bot.send_message(user_id, report_text, parse_mode='HTML')
+                
         except Exception as e:
             print(f"Ошибка отправки утреннего отчета пользователю {user_id}: {e}")
 
@@ -360,6 +390,8 @@ def send_welcome(message):
         "🎂 «У Друга день рождения 15 ноября»\n"
         "📅 «Какие у меня планы на эту неделю?»\n"
         "❌ «Удали задачу про воду»\n\n"
+        "🖼️ <b>Добавь картинку для утреннего отчёта:</b>\n"
+        "«Добавь картинку https://...»\n\n"
         "<i>Твоя цель — мой приоритет. Погнали к результатам! 🏆</i>"
     )
 
@@ -371,7 +403,18 @@ def send_welcome(message):
 @bot.message_handler(commands=['test_morning'])
 def test_morning(message):
     first_name = message.from_user.first_name or "Друг"
-    bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
+    user_id = message.chat.id
+    report_text = generate_morning_report_text(user_id, first_name)
+    image_url = get_random_morning_image()
+    
+    if image_url:
+        try:
+            bot.send_photo(user_id, image_url, caption=report_text, parse_mode='HTML')
+        except Exception as e:
+            print(f"Ошибка отправки фото: {e}. Отправляю текст.")
+            bot.send_message(user_id, report_text, parse_mode='HTML')
+    else:
+        bot.send_message(user_id, report_text, parse_mode='HTML')
 
 @bot.message_handler(commands=['send_update'])
 def broadcast_update(message):
@@ -402,6 +445,19 @@ def broadcast_update(message):
             except Exception:
                 pass
     bot.reply_to(message, f"✅ Рассылка завершена. Сообщение отправлено {success_count} пользователям.")
+
+# --- ОБРАБОТЧИК ВХОДЯЩИХ ИЗОБРАЖЕНИЙ (ДОБАВЛЕНИЕ КАРТИНОК) ---
+@bot.message_handler(content_types=['photo'])
+def handle_photo_upload(message):
+    try:
+        # Берем изображение самого высокого качества
+        file_info = bot.get_file(message.photo[-1].file_id)
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
+        
+        add_morning_image(file_url)
+        bot.reply_to(message, "✅ Отлично! Картинка добавлена в банк утренних изображений.")
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Не удалось сохранить картинку: {str(e)}")
 
 # --- ОБРАБОТЧИК AI С ИНСТРУМЕНТАМИ ---
 @bot.message_handler(func=lambda message: True)
@@ -498,9 +554,15 @@ def handle_ai_message(message):
         {
             "type": "function",
             "function": {
-                "name": "get_morning_report",
-                "description": "Утренний отчет",
-                "parameters": {"type": "object", "properties": {}}
+                "name": "add_morning_image",
+                "description": "Добавляет картинку по URL в банк утренних изображений.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Прямая ссылка на изображение (начинается с http/https)"}
+                    },
+                    "required": ["url"]
+                }
             }
         }
     ]
@@ -515,7 +577,8 @@ def handle_ai_message(message):
         "3. Событие (дата без времени) -> 'add_event'.\n"
         "4. Вопрос о планах -> 'get_schedule_for_period'.\n"
         "5. Удаление -> 'delete_task'. Передавай ключевое слово в той форме, в которой оно в задаче (например, 'воду', а не 'вода').\n"
-        "6. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
+        "6. Если пользователь присылает ссылку на картинку и просит добавить её в утренние отчёты -> 'add_morning_image'.\n"
+        "7. У тебя нет интернета. Придумывай творческие ответы про погоду/гороскоп."
     )
 
     data = {
@@ -631,9 +694,13 @@ def handle_ai_message(message):
                             bot.reply_to(message, f"🗑️ Успешно удалено ({deleted_count}) задач/событий, содержащих «{del_text}».")
                         else:
                             bot.reply_to(message, f"🤷‍♂️ Я не нашел задач со словом «{del_text}». Возможно, они уже удалены или называются иначе.")
+                
+                elif function_name == "add_morning_image":
+                    img_url = arguments.get("url", "")
+                    if img_url:
+                        add_morning_image(img_url)
+                        bot.reply_to(message, "✅ Картинка добавлена в банк утренних изображений!")
                         
-                elif function_name == "get_morning_report":
-                    bot.reply_to(message, generate_morning_report(message.chat.id, first_name))
             return
         
         ai_reply = response_message.get("content")
