@@ -4,7 +4,7 @@ import os
 import threading
 import sqlite3
 from datetime import datetime, timedelta
-import pytz
+from zoneinfo import ZoneInfo  # Используем встроенный модуль Python 3.9+
 from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -14,7 +14,7 @@ AI_API_KEY = os.getenv("AI_API_KEY")
 MY_CHAT_ID = os.getenv("MY_CHAT_ID") # Твой ID для утренних сообщений
 
 # Устанавливаем часовой пояс (Минск)
-TZ = pytz.timezone('Europe/Minsk')
+TZ = ZoneInfo('Europe/Minsk')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
