@@ -14,7 +14,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AI_API_KEY = os.getenv("AI_API_KEY")
 MY_CHAT_ID = os.getenv("MY_CHAT_ID")
 
-# Устанавливаем часовой пояс (Минск)
 TZ = ZoneInfo('Europe/Minsk')
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -43,6 +42,16 @@ def add_reminder_to_db(user_id, text, remind_time):
     conn.commit()
     conn.close()
 
+def get_reminders_by_date(user_id, date_str):
+    # date_str приходит в формате YYYY-MM-DD
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cursor = conn.cursor()
+    # Ищем задачи, где дата совпадает
+    cursor.execute("SELECT text, remind_time FROM reminders WHERE user_id = ? AND remind_time LIKE ? ORDER BY remind_time", (user_id, f"{date_str}%"))
+    reminders = cursor.fetchall()
+    conn.close()
+    return reminders
+
 def get_pending_reminders():
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cursor = conn.cursor()
@@ -61,7 +70,7 @@ def mark_reminder_as_sent(reminder_id):
 
 init_db()
 
-# --- УТРЕННЕЕ СООБЩЕНИЕ (без изменений) ---
+# --- УТРЕННЕЕ СООБЩЕНИЕ ---
 def generate_morning_report():
     today = datetime.now(TZ)
     days_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
@@ -116,42 +125,16 @@ def run_flask():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, "Привет! Я твой умный помощник.\n\n"
-                          "Попробуй написать мне обычным текстом:\n"
-                          "«Напомни мне сегодня в 15:40 отжаться 30 раз»\n\n"
-                          "Команды для теста:\n"
-                          "/test_morning - посмотреть утренний отчет\n"
-                          "/remind 13:00 почитать книгу - добавить напоминание вручную")
+                          "Я умею запоминать планы и напоминать о них. Просто скажи:\n"
+                          "«Напомни мне завтра в 10:00 позвонить маме»\n"
+                          "Или спроси:\n"
+                          "«Какие у меня планы на сегодня?»")
 
 @bot.message_handler(commands=['test_morning'])
 def test_morning(message):
     bot.reply_to(message, generate_morning_report())
 
-@bot.message_handler(commands=['remind'])
-def add_reminder_command(message):
-    try:
-        parts = message.text.split(' ', 2)
-        if len(parts) < 3:
-            bot.reply_to(message, "⚠️ Формат: /remind ЧЧ:ММ текст\nПример: /remind 13:00 почитать книгу")
-            return
-        
-        time_str = parts[1]
-        text = parts[2]
-        
-        now = datetime.now(TZ)
-        remind_time = now.replace(hour=int(time_str.split(':')[0]), minute=int(time_str.split(':')[1]), second=0, microsecond=0)
-        
-        if remind_time < now:
-            remind_time += timedelta(days=1)
-            
-        remind_time_str = remind_time.strftime("%Y-%m-%d %H:%M")
-        
-        add_reminder_to_db(message.chat.id, text, remind_time_str)
-        bot.reply_to(message, f"✅ Принято! Напомню в {time_str}:\n{text}")
-        
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка формата: {str(e)}")
-
-# --- ОБРАБОТЧИК AI С ИСПОЛЬЗОВАНИЕМ ИНСТРУМЕНТОВ (FUNCTION CALLING) ---
+# --- ОБРАБОТЧИК AI С ИНСТРУМЕНТАМИ ---
 @bot.message_handler(func=lambda message: True)
 def handle_ai_message(message):
     user_text = message.text
@@ -159,10 +142,9 @@ def handle_ai_message(message):
     url = "https://api.aiai.by/v1/chat/completions" 
     model_name = "gpt-4o-mini" 
 
-    # Получаем текущее время для нейросети
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    today_date = datetime.now(TZ).strftime("%Y-%m-%d")
     
-    # Описываем нейросети, какие инструменты у нее есть
     tools = [
         {
             "type": "function",
@@ -172,16 +154,24 @@ def handle_ai_message(message):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": {
-                            "type": "string",
-                            "description": "Текст напоминания (что нужно сделать)"
-                        },
-                        "time": {
-                            "type": "string",
-                            "description": "Время напоминания в формате 'YYYY-MM-DD HH:MM'. Текущее время: " + now_str
-                        }
+                        "text": {"type": "string", "description": "Текст напоминания"},
+                        "time": {"type": "string", "description": "Время в формате 'YYYY-MM-DD HH:MM'. Текущее время: " + now_str}
                     },
                     "required": ["text", "time"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_reminders",
+                "description": "Получает список всех напоминаний пользователя на конкретную дату",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "description": "Дата в формате 'YYYY-MM-DD'. Сегодня это: " + today_date}
+                    },
+                    "required": ["date"]
                 }
             }
         }
@@ -195,11 +185,11 @@ def handle_ai_message(message):
     data = {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": "Ты - умный виртуальный помощник. Если пользователь просит напомнить ему о чем-то, обязательно используй инструмент 'add_reminder', чтобы сохранить это. Вычисли правильную дату и время на основе текущего времени, которое передано в описании инструмента."},
+            {"role": "system", "content": "Ты - умный виртуальный помощник. Если пользователь просит напомнить о чем-то, используй 'add_reminder'. Если пользователь спрашивает о своих планах на сегодня или завтра, используй 'get_reminders'."},
             {"role": "user", "content": user_text}
         ],
         "tools": tools,
-        "tool_choice": "auto" # Нейросеть сама решает, когда вызывать инструмент
+        "tool_choice": "auto"
     }
     
     try:
@@ -207,30 +197,40 @@ def handle_ai_message(message):
         result = response.json()
         
         if 'error' in result:
-            error_msg = result['error'].get('message', 'Неизвестная ошибка API')
-            bot.reply_to(message, f"⚠️ Ошибка API: {error_msg}")
+            bot.reply_to(message, f"⚠️ Ошибка API: {result['error'].get('message')}")
             return
             
         response_message = result['choices'][0]['message']
         
-        # Проверяем, решила ли нейросеть вызвать инструмент
+        # Если нейросеть решила вызвать инструмент
         if response_message.get("tool_calls"):
             tool_call = response_message["tool_calls"][0]
             function_name = tool_call["function"]["name"]
+            arguments = json.loads(tool_call["function"]["arguments"])
             
             if function_name == "add_reminder":
-                arguments = json.loads(tool_call["function"]["arguments"])
                 rem_text = arguments.get("text")
                 rem_time = arguments.get("time")
-                
-                # Сохраняем в базу данных
                 add_reminder_to_db(message.chat.id, rem_text, rem_time)
-                
-                # Отвечаем пользователю
                 bot.reply_to(message, f"✅ Хорошо! Я добавил напоминание на {rem_time}:\n{rem_text}")
                 return
+                
+            elif function_name == "get_reminders":
+                date_str = arguments.get("date")
+                reminders = get_reminders_by_date(message.chat.id, date_str)
+                
+                if not reminders:
+                    bot.reply_to(message, f"📭 На {date_str} у вас нет запланированных дел.")
+                else:
+                    # Форматируем время из базы (из '2026-11-01 15:43' делаем просто '15:43')
+                    reply_text = f"📋 Ваши планы на {date_str}:\n"
+                    for text, time_str in reminders:
+                        short_time = time_str.split(" ")[1]
+                        reply_text += f"🕒 {short_time} — {text}\n"
+                    bot.reply_to(message, reply_text)
+                return
         
-        # Если инструмент не нужен, просто отвечаем текстом
+        # Если инструменты не нужны, просто отвечаем
         ai_reply = response_message.get("content", "Извините, я не смог обработать запрос.")
         bot.reply_to(message, ai_reply)
         
@@ -240,12 +240,12 @@ def handle_ai_message(message):
 if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
     t.start()
-    print("Бот запущен и слушает сообщения...")
+    print("Бот запущен...")
     
     import time
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
         except Exception as e:
-            print(f"Ошибка polling: {e}. Перезапуск через 15 секунд...")
+            print(f"Ошибка polling: {e}. Перезапуск...")
             time.sleep(15)
